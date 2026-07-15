@@ -252,10 +252,13 @@ async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> 
         from app.evaluation import EvaluationAgent
 
         evaluator = EvaluationAgent()
-        result = await evaluator.evaluate(payload)
+        result, profile_updates, path_updates = await evaluator.evaluate(payload)
+        response_content = result.model_dump(mode="json")
+        response_content["profile_update_suggestions"] = profile_updates
+        response_content["path_update_suggestions"] = path_updates
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content=result.model_dump(mode="json"),
+            content=response_content,
         )
     except Exception:
         body = ErrorResponse(
