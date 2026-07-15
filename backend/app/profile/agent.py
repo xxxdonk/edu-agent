@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Iterable
 
+from pydantic import ValidationError
+
+from app.llm import LLMClient, LLMError, LLMMessage, LLMValidationError
+from app.llm.errors import safe_error_summary
 from app.schemas.common import Difficulty, utc_now
 from app.schemas.profile import (
     FieldEvidence,
@@ -12,10 +18,14 @@ from app.schemas.profile import (
     StudentProfile,
     TimeBudget,
 )
+from .models import ProfileExtractionDraft
+from .prompts import PROFILE_SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
-class ProfileAgent:
-    """Day-1 input-dependent heuristic adapter; replace with structured LLM extraction on Day 2."""
+class DevelopmentProfileAgent:
+    """Input-dependent heuristic fallback used when structured LLM extraction is unavailable."""
 
     mode = "development_heuristic"
     _required_dimensions = (
@@ -364,11 +374,8 @@ class ProfileAgent:
         return []
 
     @staticmethod
-    def _consolidated_evidence(
-        profile: StudentProfile,
-        base_evidence: list[FieldEvidence],
-    ) -> list[FieldEvidence]:
-        field_names = (
+    def _profile_field_names() -> tuple[str, ...]:
+        return (
             "major",
             "course",
             "knowledge_level",
@@ -380,10 +387,16 @@ class ProfileAgent:
             "resource_preference",
             "time_budget",
         )
+
+    @staticmethod
+    def _consolidated_evidence(
+        profile: StudentProfile,
+        base_evidence: list[FieldEvidence],
+    ) -> list[FieldEvidence]:
         combined = list(base_evidence)
-        for field_name in field_names:
+        for field_name in DevelopmentProfileAgent._profile_field_names():
             combined.extend(getattr(profile, field_name).evidence)
-        return ProfileAgent._deduplicate_evidence(combined)
+        return DevelopmentProfileAgent._deduplicate_evidence(combined)
 
     @staticmethod
     def _profile_evidence(
@@ -409,18 +422,7 @@ class ProfileAgent:
 
     @staticmethod
     def _overall_confidence(profile: StudentProfile) -> float:
-        names = (
-            "major",
-            "course",
-            "knowledge_level",
-            "learning_goals",
-            "weak_topics",
-            "learning_history",
-            "cognitive_style",
-            "language_preference",
-            "resource_preference",
-            "time_budget",
-        )
+        names = DevelopmentProfileAgent._profile_field_names()
         return round(sum(getattr(profile, name).confidence for name in names) / len(names), 3)
 
     @staticmethod
@@ -434,3 +436,176 @@ class ProfileAgent:
             "time_budget": "你每周能学习几天、每天大约投入多少分钟？",
         }
         return questions[dimension]
+
+
+class ProfileAgent:
+    """Structured LLM profile extraction with an explicit heuristic fallback."""
+
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        *,
+        enable_llm: bool = False,
+        fallback: DevelopmentProfileAgent | None = None,
+    ) -> None:
+        self._llm_client = llm_client
+        self._enable_llm = enable_llm
+        self._fallback = fallback or DevelopmentProfileAgent()
+
+    async def extract(
+        self,
+        request: ProfileChatRequest,
+        previous: StudentProfile | None,
+    ) -> ProfileChatResponse:
+        if not self._enable_llm or self._llm_client is None:
+            return self._fallback.extract(request, previous)
+        try:
+            draft = await self._llm_client.generate_structured(
+                system_prompt=PROFILE_SYSTEM_PROMPT,
+                messages=[
+                    LLMMessage(
+                        role="user",
+                        content=self._prompt_payload(request, previous),
+                    )
+                ],
+                response_model=ProfileExtractionDraft,
+            )
+            self._validate_evidence(draft, request)
+            return self._build_response(draft, request, previous)
+        except (LLMError, ValidationError, ValueError) as error:
+            logger.warning("profile_llm_fallback error=%s", safe_error_summary(error))
+            return self._fallback.extract(request, previous)
+
+    @staticmethod
+    def _prompt_payload(
+        request: ProfileChatRequest,
+        previous: StudentProfile | None,
+    ) -> str:
+        payload = {
+            "student_id": request.student_id,
+            "conversation_id": request.conversation_id,
+            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "previous_profile": previous.model_dump(mode="json") if previous else None,
+            "evaluation_summary": request.evaluation_summary,
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _validate_evidence(
+        draft: ProfileExtractionDraft,
+        request: ProfileChatRequest,
+    ) -> None:
+        user_messages = {
+            message.message_id: message.content
+            for message in request.messages
+            if message.role == "user"
+        }
+        for field_name in DevelopmentProfileAgent._profile_field_names():
+            profile_field = getattr(draft, field_name)
+            has_value = profile_field.value not in (None, [])
+            if has_value and not profile_field.evidence:
+                raise LLMValidationError(
+                    f"profile field {field_name} has a value without evidence"
+                )
+            if not has_value and (profile_field.evidence or profile_field.confidence != 0):
+                raise LLMValidationError(
+                    f"empty profile field {field_name} must have no evidence and zero confidence"
+                )
+            for evidence in profile_field.evidence:
+                if evidence.source == "conversation":
+                    content = user_messages.get(evidence.message_id or "")
+                    if not content or evidence.quote not in content:
+                        raise LLMValidationError(
+                            f"conversation evidence for {field_name} is not traceable"
+                        )
+                elif evidence.source == "evaluation":
+                    summary = request.evaluation_summary or ""
+                    if evidence.message_id is not None or evidence.quote not in summary:
+                        raise LLMValidationError(
+                            f"evaluation evidence for {field_name} is not traceable"
+                        )
+                elif evidence.source == "inference":
+                    if evidence.message_id is not None:
+                        content = user_messages.get(evidence.message_id)
+                        if not content or evidence.quote not in content:
+                            raise LLMValidationError(
+                                f"inference evidence for {field_name} is not traceable"
+                            )
+                    elif not evidence.quote.startswith("推断："):
+                        raise LLMValidationError(
+                            f"inference evidence for {field_name} lacks an explanation"
+                        )
+                elif evidence.source == "system_default":
+                    if evidence.message_id is not None or "默认" not in evidence.quote:
+                        raise LLMValidationError(
+                            f"system default evidence for {field_name} is invalid"
+                        )
+
+    def _build_response(
+        self,
+        draft: ProfileExtractionDraft,
+        request: ProfileChatRequest,
+        previous: StudentProfile | None,
+    ) -> ProfileChatResponse:
+        fields: dict[str, ProfileField] = {}
+        for field_name in DevelopmentProfileAgent._profile_field_names():
+            new_field = getattr(draft, field_name).model_copy(deep=True)
+            old_field = getattr(previous, field_name) if previous else None
+            fields[field_name] = self._merge_field(new_field, old_field)
+
+        if fields["course"].value is None:
+            fields["course"] = ProfileField(
+                value="机器学习基础",
+                evidence=[
+                    FieldEvidence(
+                        source="system_default",
+                        quote="默认演示课程：《机器学习基础》",
+                    )
+                ],
+                confidence=0.55,
+            )
+
+        profile = StudentProfile(
+            student_id=request.student_id,
+            version=(previous.version + 1) if previous else 1,
+            **fields,
+            evidence=[],
+            confidence=0.0,
+            updated_at=utc_now(),
+        )
+        profile.evidence = DevelopmentProfileAgent._consolidated_evidence(profile, [])
+        profile.confidence = DevelopmentProfileAgent._overall_confidence(profile)
+        missing = self._fallback._missing_dimensions(profile)
+        next_question = None
+        if missing:
+            next_question = draft.next_question or self._fallback._next_question(missing[0])
+        return ProfileChatResponse(
+            profile=profile,
+            missing_dimensions=missing,
+            next_question=next_question,
+            is_complete=not missing,
+            extraction_mode="llm_structured",
+        )
+
+    @staticmethod
+    def _merge_field(
+        new_field: ProfileField,
+        old_field: ProfileField | None,
+    ) -> ProfileField:
+        if new_field.value in (None, []):
+            return old_field.model_copy(deep=True) if old_field else new_field
+
+        sources = {evidence.source for evidence in new_field.evidence}
+        if sources == {"system_default"}:
+            new_field.confidence = min(new_field.confidence, 0.55)
+        elif "inference" in sources and not sources.intersection(
+            {"conversation", "evaluation"}
+        ):
+            new_field.confidence = min(new_field.confidence, 0.74)
+
+        if isinstance(new_field.value, list) and old_field and isinstance(old_field.value, list):
+            new_field.value = list(dict.fromkeys([*old_field.value, *new_field.value]))
+            new_field.evidence = DevelopmentProfileAgent._deduplicate_evidence(
+                [*old_field.evidence, *new_field.evidence]
+            )
+        return new_field

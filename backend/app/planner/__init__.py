@@ -1,3 +1,3 @@
-from .agent import PlannerAgent
+from .agent import DevelopmentPlannerAgent, PlannerAgent
 
-__all__ = ["PlannerAgent"]
+__all__ = ["DevelopmentPlannerAgent", "PlannerAgent"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -22,6 +22,24 @@ def _sqlite_path(database_url: str) -> Path:
     return database_path.resolve()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True, slots=True)
+class LLMSettings:
+    enabled: bool = False
+    provider: str = "openai_compatible"
+    api_key: str = field(default="", repr=False)
+    model: str = ""
+    base_url: str = ""
+    timeout_seconds: float = 30.0
+    max_retries: int = 1
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     environment: str
@@ -31,6 +49,7 @@ class Settings:
     allowed_origins: tuple[str, ...]
     profile_mode: str
     planner_mode: str
+    llm: LLMSettings = field(default_factory=LLMSettings)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -53,4 +72,13 @@ class Settings:
             allowed_origins=origins,
             profile_mode=os.getenv("EDUAGENT_PROFILE_MODE", "development_heuristic"),
             planner_mode=os.getenv("EDUAGENT_PLANNER_MODE", "development_rule_based"),
+            llm=LLMSettings(
+                enabled=_env_bool("ENABLE_LLM", False),
+                provider=os.getenv("LLM_PROVIDER", "openai_compatible").strip().lower(),
+                api_key=os.getenv("LLM_API_KEY", ""),
+                model=os.getenv("LLM_MODEL", ""),
+                base_url=os.getenv("LLM_BASE_URL", ""),
+                timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "1")),
+            ),
         )

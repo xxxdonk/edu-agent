@@ -70,7 +70,7 @@ async def health(request: Request) -> HealthResponse:
 async def profile_chat(payload: ProfileChatRequest, request: Request) -> ProfileChatResponse:
     repository = request.app.state.repository
     previous = repository.get_latest_profile(payload.student_id)
-    response = request.app.state.profile_agent.extract(payload, previous)
+    response = await request.app.state.profile_agent.extract(payload, previous)
     repository.save_profile(response.profile)
     return response
 
@@ -107,8 +107,14 @@ async def generate_path(payload: PathGenerateRequest, request: Request) -> PathG
                 "details": {},
             },
         )
-    path = request.app.state.planner_agent.generate(
+    previous_path = (
+        repository.get_path(payload.previous_path_id)
+        if payload.previous_path_id
+        else None
+    )
+    path = await request.app.state.planner_agent.generate(
         profile,
+        previous_path=previous_path,
         previous_path_id=payload.previous_path_id,
         evaluation_summary=payload.evaluation_summary,
     )

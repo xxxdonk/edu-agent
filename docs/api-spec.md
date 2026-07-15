@@ -174,9 +174,9 @@ HTTP 业务错误和请求结构校验错误均统一使用以上 `error` 外层
 | 方法 | 路径 | 成功状态 | 用途 | 第一阶段状态 |
 |---|---|---:|---|---|
 | GET | `/api/health` | 200 | 服务与数据库健康检查 | 已实现 |
-| POST | `/api/profile/chat` | 200 | 对话提取/更新画像并返回追问 | 启发式开发适配器 |
+| POST | `/api/profile/chat` | 200 | 对话提取/更新画像并返回追问 | 结构化LLM；失败时显式降级 |
 | GET | `/api/profile/{student_id}` | 200 | 获取最新画像版本 | 已实现 |
-| POST | `/api/path/generate` | 200 | 生成或调整学习路径 | 规则开发适配器 |
+| POST | `/api/path/generate` | 200 | 生成或调整学习路径 | 结构化LLM；失败时显式降级 |
 | POST | `/api/resources/generate` | 202 | 创建五类资源异步任务 | 编排骨架已实现，等待 Agent 2 注册 |
 | GET | `/api/tasks/{task_id}` | 200 | 查询任务状态 | 已实现 |
 | GET | `/api/tasks/{task_id}/events` | 200 | SSE 获取任务事件 | 已实现 |
@@ -222,6 +222,8 @@ HTTP 业务错误和请求结构校验错误均统一使用以上 `error` 外层
 
 同一 `student_id` 再次提交会创建 `version + 1` 的新画像，旧版本保存在数据库中。
 
+`extraction_mode` 严格使用冻结枚举：结构化 LLM 成功为 `llm_structured`；配置缺失、网络/超时、安全拒绝、JSON 或 Schema 校验失败时为 `development_heuristic`。降级不会改变响应结构，也不得被解释为真实 LLM 结果。
+
 ### GET /api/profile/{student_id}
 
 返回最新 StudentProfile。不存在返回 404。
@@ -240,6 +242,8 @@ HTTP 业务错误和请求结构校验错误均统一使用以上 `error` 外层
 ```
 
 `profile` 为空时读取数据库中的最新画像。调整路径时传 `previous_path_id` 和 `evaluation_summary`。响应为 `{"path": LearningPath}`。
+
+`generation_mode` 严格使用冻结枚举：结构化 LLM 成功为 `llm_structured`；降级为 `development_rule_based`。当前 Planner 未接入课程知识库，不会在路径内容中声称已执行知识库检索。
 
 ### POST /api/resources/generate
 
