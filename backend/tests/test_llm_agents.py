@@ -12,6 +12,7 @@ from app.llm import (
 from app.llm.openai_compatible import OpenAICompatibleLLMClient
 from app.planner import PlannerAgent
 from app.profile import DevelopmentProfileAgent, ProfileAgent
+from app.profile.models import ProfileExtractionDraft
 from app.schemas import ProfileChatRequest, ResourceType
 from app.schemas.profile import ChatMessage
 
@@ -330,3 +331,83 @@ def test_openai_compatible_client_rejects_missing_configuration_without_network(
             model="test-model",
             base_url="https://example.invalid/v1",
         )
+
+
+def test_private_profile_draft_clears_evidence_for_empty_list() -> None:
+    raw = _complete_profile_draft()
+    raw["weak_topics"] = _list(
+        [],
+        [_evidence("conversation", "数学基础比较一般")],
+        0.9,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.weak_topics.value == []
+    assert draft.weak_topics.evidence == []
+    assert draft.weak_topics.confidence == 0
+
+
+def test_private_profile_draft_zeros_confidence_for_null() -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        None,
+        [_evidence("conversation", "人工智能专业")],
+        0.86,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value is None
+    assert draft.major.evidence == []
+    assert draft.major.confidence == 0
+
+
+def test_private_profile_draft_treats_empty_string_as_empty_value() -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        "  ",
+        [_evidence("conversation", "人工智能专业")],
+        0.86,
+    )
+    raw["learning_goals"] = _scalar(
+        "",
+        [_evidence("conversation", "我想理解支持向量机")],
+        0.86,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value is None
+    assert draft.learning_goals.value == []
+    assert draft.major.evidence == []
+    assert draft.learning_goals.evidence == []
+
+
+def test_private_profile_draft_preserves_nonempty_field() -> None:
+    raw = _complete_profile_draft()
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value == "人工智能"
+    assert draft.major.evidence[0].quote == "人工智能专业"
+    assert draft.major.evidence[0].message_id == "message-a"
+    assert draft.major.confidence == 0.92
+
+
+def test_untraceable_conversation_evidence_still_triggers_fallback() -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        "人工智能",
+        [_evidence("conversation", "用户从未说过的原文")],
+        0.92,
+    )
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([raw]), enable_llm=True).extract(
+            _complete_request(),
+            None,
+        )
+    )
+
+    assert response.extraction_mode == "development_heuristic"

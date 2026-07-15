@@ -32,6 +32,7 @@ class OpenAICompatibleLLMClient:
         base_url: str,
         timeout_seconds: float = 30.0,
         max_retries: int = 1,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not api_key:
             raise LLMConfigurationError("LLM_API_KEY is not configured")
@@ -49,6 +50,7 @@ class OpenAICompatibleLLMClient:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
+        self._transport = transport
 
     async def generate_structured(
         self,
@@ -96,7 +98,10 @@ class OpenAICompatibleLLMClient:
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                transport=self._transport,
+            ) as client:
                 response = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers=headers,
@@ -150,6 +155,8 @@ class OpenAICompatibleLLMClient:
         choice = choices[0]
         if not isinstance(choice, dict):
             raise LLMResponseFormatError("LLM response choice is invalid")
+        if choice.get("finish_reason") == "length":
+            raise LLMResponseFormatError("LLM response was truncated")
         if choice.get("finish_reason") == "content_filter":
             raise LLMSafetyRefusalError("LLM provider rejected content for safety")
         message = choice.get("message")
