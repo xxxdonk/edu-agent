@@ -251,8 +251,10 @@ async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> 
     try:
         from app.evaluation import EvaluationAgent, EvaluationService
 
+        llm_client = request.app.state.llm_client
+        enable_llm = request.app.state.settings.llm.enabled
         service = EvaluationService(
-            evaluator=EvaluationAgent(),
+            evaluator=EvaluationAgent(llm_client, enable_llm=enable_llm),
             profile_agent=request.app.state.profile_agent,
             planner_agent=request.app.state.planner_agent,
             repository=request.app.state.repository,

@@ -1,10 +1,27 @@
+"""EvaluationAgent — LLM-driven & heuristic dual-path answer evaluator.
+
+When ``enable_llm`` is True and an ``LLMClient`` instance is available, the
+agent uses structured LLM output to judge every student answer against
+standard answers or course knowledge.  Otherwise it falls back to the
+Phase‑1 heuristic path (length‑based correctness) so that the system
+remains functional even without an LLM backend.
+"""
+
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from uuid import uuid4
 
+from pydantic import ValidationError
+
+from app.llm import LLMClient, LLMError, LLMMessage
+from app.llm.errors import safe_error_summary
 from app.schemas import EvaluationResult, EvaluationSubmission
+
+from .models import EvaluationDraft
+from .prompts import EVALUATION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +38,89 @@ class _QuestionMeta:
 class EvaluationAgent:
     agent_name = "evaluation_agent"
 
+    # ------------------------------------------------------------------
+    # Constructor
+    # ------------------------------------------------------------------
+
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        *,
+        enable_llm: bool = False,
+    ) -> None:
+        self._llm_client = llm_client
+        self._enable_llm = enable_llm
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def evaluate(
+        self,
+        submission: EvaluationSubmission,
+    ) -> tuple[EvaluationResult, dict, dict]:
+        """Evaluate a batch of answers and return (result, profile suggestions, path suggestions)."""
+
+        if self._enable_llm and self._llm_client is not None:
+            try:
+                return await self._evaluate_with_llm(submission)
+            except (LLMError, ValidationError, ValueError) as error:
+                logger.warning(
+                    "evaluation_fallback_to_heuristic reason=%s",
+                    safe_error_summary(error),
+                )
+        return self._evaluate_heuristic(submission)
+
+    # ==================================================================
+    # LLM path
+    # ==================================================================
+
+    async def _evaluate_with_llm(
+        self,
+        submission: EvaluationSubmission,
+    ) -> tuple[EvaluationResult, dict, dict]:
+        """Use the LLM client to judge every answer via structured output."""
+
+        # Build payload: every question with its metadata and the student response
+        questions_payload: list[dict] = []
+        for answer in submission.answers:
+            meta = self._resolve_question(answer.question_id, answer.response)
+            questions_payload.append(
+                {
+                    "question_id": meta.question_id,
+                    "topic": meta.topic,
+                    "difficulty": meta.level,
+                    "max_points": meta.points,
+                    "standard_answer": meta.correct_answer or "",
+                    "student_response": answer.response,
+                }
+            )
+
+        system_prompt = EVALUATION_SYSTEM_PROMPT
+        user_content = json.dumps(
+            {
+                "student_id": submission.student_id,
+                "path_id": submission.path_id,
+                "step": submission.step,
+                "questions": questions_payload,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        draft: EvaluationDraft = await self._llm_client.generate_structured(
+            system_prompt=system_prompt,
+            messages=[LLMMessage(role="user", content=user_content)],
+            response_model=EvaluationDraft,
+        )
+
+        return self._build_result_from_draft(submission, draft)
+
+    # ==================================================================
+    # Heuristic fallback (Phase‑1 mock)
+    # ==================================================================
+
+    def _evaluate_heuristic(
         self,
         submission: EvaluationSubmission,
     ) -> tuple[EvaluationResult, dict, dict]:
@@ -31,7 +130,6 @@ class EvaluationAgent:
         feedback_parts: list[str] = []
 
         for answer in submission.answers:
-            # 动态解析题目元数据，不再硬编码
             question_meta = self._resolve_question(answer.question_id, answer.response)
             max_score += question_meta.points
 
@@ -45,7 +143,6 @@ class EvaluationAgent:
                 )
                 weak_topics.append(question_meta.topic)
             else:
-                # 完全错误：0 分
                 feedback_parts.append(
                     f"题目 {answer.question_id}：错误 / 需要重点复习 {question_meta.topic}"
                 )
@@ -64,12 +161,9 @@ class EvaluationAgent:
                 f"建议重点复习：{'、'.join(weak_topics_deduped)}"
             )
 
-        # 构建画像更新建议
         profile_update_suggestions = self._build_profile_updates(
             submission, mastery_score, passed, weak_topics_deduped
         )
-
-        # 构建学习路径调整建议
         path_update_suggestions = self._build_path_updates(
             submission, mastery_score, passed, weak_topics_deduped
         )
@@ -91,19 +185,17 @@ class EvaluationAgent:
             path_update_suggestions,
         )
 
+    # ==================================================================
+    # Shared helpers
+    # ==================================================================
+
     @staticmethod
     def _resolve_question(question_id: str, response: str) -> _QuestionMeta:
-        """动态判定题目元数据——从题目 ID 和答案中推断，不再使用硬编码默认值。
+        """Dynamically infer question metadata from the question_id naming convention."""
 
-        根据 question_id 的命名惯例推断 topic 和 level:
-        - 包含 'basic' / 'fundamental' → basic
-        - 包含 'intermediate' / 'medium' → intermediate
-        - 包含 'advanced' / 'hard' → advanced
-        - 否则 → basic
-        """
         qid_lower = question_id.lower()
 
-        # 推断难度
+        # Infer difficulty
         if any(kw in qid_lower for kw in ("advanced", "hard", "综合", "complex")):
             level = "advanced"
         elif any(kw in qid_lower for kw in ("intermediate", "medium", "mid", "应用")):
@@ -111,7 +203,7 @@ class EvaluationAgent:
         else:
             level = "basic"
 
-        # 推断知识点
+        # Infer topic
         topic_keywords = {
             "overview": "机器学习概述",
             "linear": "线性回归",
@@ -131,7 +223,7 @@ class EvaluationAgent:
                 topic = val
                 break
 
-        # 根据 response 长度和质量推断分值
+        # Infer points from response length
         response_clean = response.strip()
         if len(response_clean) > 200:
             points = 5.0
@@ -144,18 +236,15 @@ class EvaluationAgent:
             question_id=question_id,
             level=level,
             topic=topic,
-            correct_answer="",  # 动态判题模式下不预设答案
+            correct_answer="",
             points=points,
         )
 
     @staticmethod
     def _is_correct(response: str, correct_answer: str) -> bool:
-        """判断答案是否正确"""
         response_clean = response.strip().lower().replace(" ", "")
         if not correct_answer:
-            # 动态模式：根据长度和关键词做启发式判断
             return len(response_clean) > 50 and len(response_clean) < 5000
-
         correct_clean = correct_answer.strip().lower().replace(" ", "")
         if response_clean == correct_clean:
             return True
@@ -163,16 +252,56 @@ class EvaluationAgent:
 
     @staticmethod
     def _is_partial(response: str, correct_answer: str) -> bool:
-        """判断答案是否部分正确（有内容但不够完整）"""
         response_clean = response.strip().lower().replace(" ", "")
         if not correct_answer:
-            # 动态模式：有实质内容但不够完整
             return 10 < len(response_clean) <= 50
-        # 有预设答案时：答案中有部分匹配
         correct_clean = correct_answer.strip().lower().replace(" ", "")
         return len(response_clean) > 5 and not (
             response_clean == correct_clean or correct_clean in response_clean[:100]
         )
+
+    def _build_result_from_draft(
+        self,
+        submission: EvaluationSubmission,
+        draft: EvaluationDraft,
+    ) -> tuple[EvaluationResult, dict, dict]:
+        """Convert the parsed EvaluationDraft into the canonical tuple."""
+
+        feedback_lines: list[str] = []
+        for judgment in draft.judgments:
+            symbol = {"correct": "✓", "partial": "△", "incorrect": "✗"}.get(
+                judgment.verdict, "?"
+            )
+            feedback_lines.append(
+                f"题目 {judgment.question_id}：{symbol} {judgment.reasoning}"
+            )
+
+        feedback = f"{draft.feedback}\n\n---\n逐题详情：\n" + "\n".join(feedback_lines)
+
+        result = EvaluationResult(
+            evaluation_id=str(uuid4()),
+            student_id=submission.student_id,
+            path_id=submission.path_id,
+            step=submission.step,
+            mastery_score=round(draft.mastery_score, 4),
+            passed=draft.passed,
+            weak_topics=list(dict.fromkeys(draft.weak_topics)),
+            feedback=feedback,
+            profile_update_required=not draft.passed,
+            path_update_required=not draft.passed,
+        )
+
+        profile_updates = self._build_profile_updates(
+            submission, result.mastery_score, result.passed, result.weak_topics
+        )
+        path_updates = self._build_path_updates(
+            submission, result.mastery_score, result.passed, result.weak_topics
+        )
+        return result, profile_updates, path_updates
+
+    # ==================================================================
+    # Profile / Path suggestion builders (shared by both paths)
+    # ==================================================================
 
     @staticmethod
     def _build_profile_updates(
@@ -181,11 +310,8 @@ class EvaluationAgent:
         passed: bool,
         weak_topics: list[str],
     ) -> dict:
-        """构建画像更新建议"""
-        # 薄弱知识点
         weak_topics_list = weak_topics if weak_topics else []
 
-        # 知识水平调整建议
         if mastery_score >= 0.85:
             knowledge_level_adjustment = "advanced"
         elif mastery_score >= 0.6:
@@ -193,7 +319,6 @@ class EvaluationAgent:
         else:
             knowledge_level_adjustment = "basic"
 
-        # 认知风格证据
         cognitive_style_evidence = None
         time_spent = submission.time_spent_minutes
         num_answers = len(submission.answers)
@@ -204,7 +329,6 @@ class EvaluationAgent:
             elif avg_time > 10:
                 cognitive_style_evidence = "深思熟虑风格：学生花费较长时间仔细推敲答案"
 
-        # 资源偏好调整
         resource_preference_adjustment = None
         if not passed:
             if weak_topics:
@@ -226,10 +350,8 @@ class EvaluationAgent:
         passed: bool,
         weak_topics: list[str],
     ) -> dict:
-        """构建学习路径调整建议"""
         revisit_topics = weak_topics if weak_topics else []
 
-        # 建议的下一步话题
         next_topics_map = {
             "机器学习概述": ["线性回归"],
             "线性回归": ["逻辑回归"],
@@ -244,9 +366,8 @@ class EvaluationAgent:
         for topic in weak_topics if passed else (weak_topics or ["机器学习概述"]):
             next_topics_all.extend(next_topics_map.get(topic, []))
 
-        next_topics = list(dict.fromkeys(next_topics_all))  # 去重保序
+        next_topics = list(dict.fromkeys(next_topics_all))
 
-        # 优先级调整说明
         if passed:
             priority_adjustment = "学生已通过当前阶段评估，可按原路径继续推进"
         else:
@@ -255,7 +376,6 @@ class EvaluationAgent:
                 f"建议优先复习薄弱知识点后再进入下一阶段"
             )
 
-        # 建议额外学习时间
         if mastery_score >= 0.8:
             estimated_extra = 15
         elif mastery_score >= 0.6:
