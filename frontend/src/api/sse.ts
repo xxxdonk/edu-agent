@@ -9,6 +9,10 @@ interface StreamHandlers {
 
 const terminalStatuses = new Set(['completed', 'partial_success', 'failed']);
 
+export function isTerminalTaskEvent(event: TaskEvent): boolean {
+  return event.event_type === 'task' && terminalStatuses.has(event.status);
+}
+
 export function connectTaskEvents(eventsUrl: string, handlers: StreamHandlers): () => void {
   let source: EventSource | null = null;
   let stopped = false;
@@ -28,7 +32,7 @@ export function connectTaskEvents(eventsUrl: string, handlers: StreamHandlers): 
         lastSequence = event.sequence;
         retries = 0;
         handlers.onEvent(event);
-        if (terminalStatuses.has(event.status)) {
+        if (isTerminalTaskEvent(event)) {
           stopped = true;
           source?.close();
           handlers.onTerminal();

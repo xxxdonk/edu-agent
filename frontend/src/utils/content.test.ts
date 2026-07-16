@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {parseQuiz} from './content';
+import {normalizeMermaidContent, parseQuiz} from './content';
 import type {Resource} from '@/types/api';
 
 const baseResource: Resource = {
@@ -16,5 +16,17 @@ describe('parseQuiz', () => {
 
   it('returns null for malformed agent content', () => {
     expect(parseQuiz({...baseResource, content: '{bad json'})).toBeNull();
+  });
+});
+
+describe('normalizeMermaidContent', () => {
+  it('extracts Mermaid source from a fenced resource response', () => {
+    const content = '```mermaid\nmindmap\n  root((梯度下降))\n```\n\n<!-- 知识库参考片段已用于生成 -->';
+    expect(normalizeMermaidContent(content)).toBe('mindmap\n  root((梯度下降))');
+  });
+
+  it('keeps raw Mermaid source while removing trailing comments', () => {
+    const content = 'flowchart TD\n  A --> B\n<!-- source -->';
+    expect(normalizeMermaidContent(content)).toBe('flowchart TD\n  A --> B');
   });
 });

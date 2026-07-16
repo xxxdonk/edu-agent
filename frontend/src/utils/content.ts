@@ -19,6 +19,12 @@ export function renderMarkdown(content: string): string {
   return markdown.render(content);
 }
 
+export function normalizeMermaidContent(content: string): string {
+  const fencedBlock = content.match(/```(?:mermaid)?\s*\r?\n([\s\S]*?)```/i);
+  const source = fencedBlock?.[1] ?? content;
+  return source.replace(/<!--[\s\S]*?-->/g, '').trim();
+}
+
 export function parseQuiz(resource: Resource | undefined): QuizDocument | null {
   if (!resource || resource.resource_type !== 'quiz') return null;
   try {
