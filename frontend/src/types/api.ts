@@ -178,6 +178,18 @@ export interface EvaluationSubmission {
   time_spent_minutes: number;
 }
 
+export interface EvaluationProfileSuggestions {
+  updated_profile_version?: number;
+  extraction_mode?: ProfileChatResponse['extraction_mode'];
+  evidence_source?: string;
+}
+
+export interface EvaluationPathSuggestions {
+  new_path_id?: string;
+  updated_path?: LearningPath;
+  generation_mode?: LearningPath['generation_mode'];
+}
+
 export interface EvaluationResult {
   evaluation_id: string;
   student_id: string;
@@ -190,6 +202,8 @@ export interface EvaluationResult {
   profile_update_required: boolean;
   path_update_required: boolean;
   evaluated_at: string;
+  profile_update_suggestions?: EvaluationProfileSuggestions | null;
+  path_update_suggestions?: EvaluationPathSuggestions | null;
 }
 
 export interface ApiErrorBody {

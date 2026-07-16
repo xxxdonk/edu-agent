@@ -33,23 +33,6 @@ interface AssistantAnimationTask {
   resolve: () => void;
 }
 
-interface EvaluationProfileSuggestions {
-  updated_profile_version?: number;
-  extraction_mode?: ProfileChatResponse['extraction_mode'];
-  evidence_source?: string;
-}
-
-interface EvaluationPathSuggestions {
-  new_path_id?: string;
-  updated_path?: unknown;
-  generation_mode?: LearningPath['generation_mode'];
-}
-
-type EvaluationWithSuggestions = EvaluationResult & {
-  profile_update_suggestions?: EvaluationProfileSuggestions;
-  path_update_suggestions?: EvaluationPathSuggestions;
-};
-
 const resourceTypes: ResourceType[] = ['explanation', 'mind_map', 'quiz', 'reading', 'coding'];
 const terminalStatuses = new Set(['completed', 'partial_success', 'failed']);
 const profileFallbackNotice = '结构化 LLM 未成功完成，本轮启发式接管，精确原因见后端 profile_fallback 日志';
@@ -462,7 +445,7 @@ export const useLearningStore = defineStore('learning', () => {
       time_spent_minutes: timeSpentMinutes,
     };
     try {
-      const result = await api.evaluate(payload) as EvaluationWithSuggestions;
+      const result = await api.evaluate(payload);
       evaluation.value = result;
       evaluationStatus.value = 'success';
 
