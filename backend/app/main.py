@@ -33,7 +33,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         database.initialize()
-        load_optional_resource_agents(registry)
+        load_optional_resource_agents(
+            registry,
+            llm_client,
+            enable_llm=runtime_settings.llm.enabled,
+        )
         yield
 
     app = FastAPI(

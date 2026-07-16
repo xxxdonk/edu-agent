@@ -247,16 +247,31 @@ async def task_events(
     responses={501: {"model": ErrorResponse}},
     tags=["evaluation"],
 )
-async def submit_evaluation(payload: EvaluationSubmission) -> JSONResponse:
-    _ = payload
-    body = ErrorResponse(
-        error=ErrorDetail(
-            code="EVALUATION_AGENT_NOT_IMPLEMENTED",
-            message="第一阶段仅固定评价接口契约，Agent 2 将在后续阶段实现真实评价。",
-            details={"mock": True},
+async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> JSONResponse:
+    try:
+        from app.evaluation import EvaluationAgent
+
+        evaluator = EvaluationAgent()
+        result, profile_updates, path_updates = await evaluator.evaluate(payload)
+        response_content = result.model_dump(mode="json")
+        response_content["profile_update_suggestions"] = profile_updates
+        response_content["path_update_suggestions"] = path_updates
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=response_content,
         )
-    )
-    return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED, content=body.model_dump())
+    except Exception:
+        body = ErrorResponse(
+            error=ErrorDetail(
+                code="EVALUATION_ERROR",
+                message="Evaluation failed.",
+                details={"mock": True},
+            )
+        )
+        return JSONResponse(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            content=body.model_dump(),
+        )
 
 
 @router.get(
