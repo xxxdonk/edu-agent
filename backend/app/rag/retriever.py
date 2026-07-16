@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -10,8 +11,46 @@ from .loader import DocumentChunk, load_knowledge_base
 
 logger = logging.getLogger(__name__)
 
+_CJK_STOP_TERMS = {
+    "一个",
+    "一下",
+    "什么",
+    "内容",
+    "可以",
+    "完成",
+    "希望",
+    "怎么",
+    "怎样",
+    "目前",
+    "相关",
+    "知识",
+    "课程",
+}
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data" / "machine_learning"
+
+
+def knowledge_base_version(data_dir: Path | None = None) -> str:
+    """Return a deterministic SHA-256 for every file consumed by the loader."""
+
+    root = data_dir or DATA_DIR
+    candidates = [
+        path
+        for path in root.iterdir()
+        if path.is_file()
+        and (
+            path.name in {"syllabus.md", "sources.json"}
+            or re.fullmatch(r"\d{2}-.+\.md", path.name)
+        )
+    ] if root.exists() else []
+    digest = hashlib.sha256()
+    for path in sorted(candidates, key=lambda item: item.name):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class KnowledgeRetriever:
@@ -19,6 +58,10 @@ class KnowledgeRetriever:
         self._chunks: list[DocumentChunk] = []
         self._data_dir = data_dir or DATA_DIR
         self._loaded = False
+
+    @property
+    def knowledge_base_version(self) -> str:
+        return knowledge_base_version(self._data_dir)
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -68,9 +111,16 @@ class KnowledgeRetriever:
         text_lower = text.lower()
         for match in re.finditer(r"[\u4e00-\u9fff]+|[a-z0-9_-]+", text_lower):
             token = match.group()
-            if len(token) >= 2:
+            if re.fullmatch(r"[\u4e00-\u9fff]+", token):
                 tokens.append(token)
-        return tokens
+                for size in range(2, min(4, len(token)) + 1):
+                    for start in range(len(token) - size + 1):
+                        term = token[start : start + size]
+                        if term not in _CJK_STOP_TERMS:
+                            tokens.append(term)
+            elif len(token) >= 2:
+                tokens.append(token)
+        return list(dict.fromkeys(tokens))
 
     @staticmethod
     def _score(
@@ -83,6 +133,11 @@ class KnowledgeRetriever:
 
         topic_tokens = KnowledgeRetriever._tokenize(topic)
         chunk_text = chunk.content.lower()
+
+        normalized_topic = re.sub(r"\s+", "", topic.lower())
+        normalized_chunk = re.sub(r"\s+", "", chunk_text)
+        if normalized_topic and normalized_topic in normalized_chunk:
+            score += 8.0
 
         for term in topic_tokens:
             if term in chunk_text:

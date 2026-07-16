@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from app.schemas import LearningPath, Resource, ResourceGenerationRequest, ResourceType, StudentProfile
 
@@ -12,6 +12,7 @@ class SharedAgentContext:
     request: ResourceGenerationRequest
     profile: StudentProfile
     path: LearningPath
+    emit_event: Callable[..., object] | None = None
 
 
 class ResourceAgent(Protocol):

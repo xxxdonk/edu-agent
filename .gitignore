@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!frontend/.env.example
 .venv/
 **/__pycache__/
 *.pyc
@@ -12,6 +15,9 @@ data/*.db-wal
 data/**/*.db
 data/**/*.db-shm
 data/**/*.db-wal
+*.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 node_modules/
@@ -21,3 +27,9 @@ build/
 frontend/dist/
 frontend/.vite/
 .vite/
+*.log
+*.tmp
+artifacts/
+debug-responses/
+Thumbs.db
+.DS_Store

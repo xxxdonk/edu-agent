@@ -1,128 +1,165 @@
 # EduAgent
 
-EduAgent 是面向中国软件杯 A3 赛题的多智能体个性化学习系统。当前公共基线提供自然语言学习画像、个性化学习路径、SQLite 持久化、资源任务编排协议、任务状态和 SSE 进度；Profile Agent 与 Planner Agent 已支持统一客户端驱动的结构化 LLM 输出。五类真实资源 Agent、Reviewer 和 Evaluation 将由后续阶段接入。
+EduAgent 是面向中国软件杯 A3 赛题的多智能体个性化学习系统。它从自然语言对话建立带证据的学生画像，生成个性化学习路径，并通过课程知识库、五类资源 Agent、Reviewer、SSE 和 Evaluation 完成“学习—练习—评价—画像更新—路径重规划”闭环。
+
+当前公共契约为 `api-contract-v0.1`：9 个 API 操作、公共 Schema、字段和枚举均已冻结。运行时模型通过 OpenAI 兼容协议接入 DeepSeek；没有可用模型服务时，系统会明确显示 development 降级，绝不把本地规则结果冒充为大模型结果。
+
+## 已实现能力
+
+- Profile Agent：完整对话历史驱动的结构化画像，保存字段级证据、置信度和版本。
+- Planner Agent：依据画像、薄弱点、目标和时间预算生成有序路径，评价后可重新规划。
+- 课程 RAG：加载 `data/machine_learning/` 中的课程章节和来源清单，返回可追溯引用。
+- 五类资源 Agent：`explanation`、`mind_map`、`quiz`、`reading`、`coding` 并行生成。
+- Reviewer：逐项检查来源、个性化、Markdown、Mermaid、Python、Quiz 一致性和内容安全。
+- Orchestrator：单项失败隔离、`completed | partial_success | failed` 终态和可恢复 SSE。
+- Evaluation：使用持久化 Quiz 答案评分，以 `evaluation` 证据更新画像并重新规划路径。
+- 前端工作台：对话、画像、路径、实时进度、五类资源和评价闭环展示。
+- 资源缓存：仅缓存通过 Reviewer 且不是 development fallback 的资源；缓存命中仍创建新资源 ID 并重新审校。
 
 ## 项目结构
 
 ```text
-backend/app/api            FastAPI接口与统一错误处理
-backend/app/schemas        公共数据契约
+backend/app/api            FastAPI 接口、SSE 与统一错误处理
+backend/app/schemas        冻结的公共数据契约
 backend/app/profile        Profile Agent
 backend/app/planner        Planner Agent
-backend/app/llm            统一LLM协议、兼容客户端与测试Fake
-backend/app/orchestrator   Agent协议、注册和任务编排
-backend/app/database       SQLite与仓储
-backend/tests              自动化公共契约测试
-frontend                   Agent 3前端入口
-data/machine_learning      Agent 2课程知识库入口
-docs                       架构、API和交接文档
+backend/app/llm            OpenAI 兼容模型客户端
+backend/app/orchestrator   并行编排、任务状态与进程内缓存
+backend/app/rag            课程知识库加载、检索和版本摘要
+backend/app/resources      五类资源 Agent 与 Reviewer
+backend/app/evaluation     Quiz 评分与学习反馈
+backend/app/database       SQLite 与仓储
+frontend                   Vue 3 学习工作台
+data/machine_learning      机器学习课程资料与来源索引
+scripts                    启动、预热、端到端和演示案例验证
+docs                       API、架构、测试、使用与合规文档
 ```
 
-公共模型名称固定为 `Resource`（学习资源实体）和 `TaskState`（资源生成任务状态实体）。禁止重复创建 `LearningResource`、`GenerationTask` 等同义模型。
+公共实体名称固定为 `Resource` 和 `TaskState`，不得创建同义公共模型。
 
-## 运行环境
+## Windows 环境
 
-- Python 3.11及以上
-- 当前验收环境：Python 3.13.5
-- SQLite（Python标准库自带）
+- Windows 10 或 Windows 11
+- PowerShell 5.1 或 PowerShell 7
+- Python 3.11 及以上
+- Node.js 20 及以上
+- npm 10 及以上
+- Microsoft Edge 或 Chrome 最新稳定版
 
-## 安装依赖
-
-在仓库根目录执行：
+在仓库根目录安装依赖：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r .\backend\requirements-dev.txt
+Set-Location .\frontend
+npm ci
+Set-Location ..
 ```
 
-## 环境变量
+复制配置模板：
 
 ```powershell
 Copy-Item .\.env.example .\.env
 ```
 
-`.env` 只用于本机运行且已被 Git 忽略，严禁提交。复制后至少配置：
+真实模型演示需要在根目录 `.env` 中配置 `ENABLE_LLM`、`LLM_PROVIDER`、`LLM_BASE_URL`、`LLM_MODEL` 和 `LLM_API_KEY`。DeepSeek 使用 `openai_compatible` 供应商协议。真实密钥只能保存在本机 `.env` 或系统环境变量中；启动日志只输出是否存在密钥，不输出密钥内容。
 
-```env
-ENABLE_LLM=true
-LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=<正式模型的OpenAI兼容API根地址>
-LLM_MODEL=<正式模型名称>
-LLM_API_KEY=<仅保存在本机的密钥>
-LLM_TIMEOUT_SECONDS=30
-LLM_MAX_RETRIES=1
+常用缓存配置：
+
+- `EDUAGENT_RESOURCE_CACHE_ENABLED`：默认启用。
+- `EDUAGENT_RESOURCE_CACHE_TTL_SECONDS`：默认 1800 秒。
+- `EDUAGENT_RESOURCE_CACHE_MAX_ENTRIES`：默认 128 项。
+
+缓存键包含学生 ID、画像版本及指纹、路径 ID、步骤及指纹、资源类型、模型标识、知识库版本和生成器修订号。画像、路径、模型、知识库或生成逻辑变化后不会误用旧缓存；请求中的 `regenerate=true` 会绕过并失效当前键。缓存是单进程内存缓存，服务重启后自然清空。
+
+## 一键启动
+
+依赖安装完成后，在仓库根目录运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_demo.ps1
 ```
 
-关键配置：
+脚本检查 Python、npm、前端依赖和端口后，以隐藏子进程启动后端和前端。保持 PowerShell 窗口打开；按 `Ctrl+C` 同时停止两个服务。脚本不读取或打印 API Key，运行日志写入系统临时目录。
 
-- `DATABASE_URL=sqlite:///./data/eduagent.db`：相对仓库根目录解析，与当前工作目录无关。
-- `EDUAGENT_ALLOWED_ORIGINS`：前端允许来源。
-- `ENABLE_LLM=true`：启用结构化 LLM 尝试；设为 `false` 时直接使用 development 降级实现。
-- `LLM_PROVIDER=openai_compatible`：当前支持 `openai_compatible` 和 `dashscope`（OpenAI 兼容接口）。
-- `LLM_API_KEY`：必须留在被忽略的 `.env` 或系统环境变量，严禁提交真实密钥。
-- `LLM_MODEL`、`LLM_BASE_URL`：模型名称与兼容接口基地址。
-- `LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=1`：单次超时与有限重试次数。
+打开：
 
-## 手动验证真实 Profile/Planner
+- 前端：`http://127.0.0.1:5173/`
+- 健康检查：`http://127.0.0.1:8000/api/health`
+- Swagger：`http://127.0.0.1:8000/docs`
 
-配置项目根目录 `.env` 后，在仓库根目录执行：
+## 手动启动
+
+后端窗口：
+
+```powershell
+Set-Location .\backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+后端始终从项目根目录加载 `.env`，与当前工作目录无关。
+
+前端窗口：
+
+```powershell
+Set-Location .\frontend
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+## 模型预热与验证
+
+服务启动前可先验证 Profile 和 Planner 的真实结构化调用：
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\verify_llm_profile_planner.py
 ```
 
-该脚本不会被 pytest 自动执行，也不会保存完整模型响应。它只输出供应商、模型、Profile/Planner 模式、缺失维度、追问、路径主题、调用耗时和是否发生降级；未配置密钥时会在发起网络请求前友好退出。
-
-## 启动
+该脚本可作为模型连接预热，不保存完整响应，也不输出密钥。完整服务启动后运行真实端到端验证：
 
 ```powershell
-Set-Location .\backend
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --env-file ..\.env
+.\.venv\Scripts\python.exe .\scripts\verify_end_to_end.py --verify-cache
+.\.venv\Scripts\python.exe .\scripts\verify_resource_stability.py --runs 3
 ```
 
-不创建 `.env` 时也可使用安全默认配置启动。
-
-## 测试
+运行三个固定演示案例：
 
 ```powershell
-Set-Location .\backend
-..\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe .\scripts\verify_demo_cases.py
 ```
 
-## API文档
+案例数据保存在 `scripts/demo_cases.json`。验证脚本为每个案例创建唯一学生 ID，只输出安全摘要。为应对真实模型波动，每个案例默认最多透明尝试 4 次；输出会保留尝试次数和此前失败码，不会把失败伪装成首次成功。
 
-- Swagger UI：`http://127.0.0.1:8000/docs`
-- OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
-- 健康检查：`http://127.0.0.1:8000/api/health`
-- 详细契约：[docs/api-spec.md](docs/api-spec.md)
+## 自动测试与构建
 
-## 当前真实功能
+在仓库根目录执行：
 
-- FastAPI公共API和统一结构校验。
-- 学生画像版本、学习路径、任务、事件和资源的SQLite持久化。
-- Profile Agent 基于结构化 LLM 输出抽取画像，校验证据原文、来源分类、置信度和画像版本。
-- Planner Agent 基于结构化 LLM 输出生成有序路径，校验时间预算、前置关系、总时长与重复步骤。
-- LLM 客户端统一封装供应商配置、超时、有限重试、异常分类和 Pydantic 结构校验。
-- Orchestrator并行调用协议、单Agent失败隔离、Reviewer逐资源审校流程。
-- 持久化任务状态与SSE事件。
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+Set-Location .\frontend
+npm test -- --run
+npm run build
+```
 
-## 当前development功能
+自动测试使用 Fake LLM 或本地实现，不访问真实网络。详细结果见 [docs/test-report.md](docs/test-report.md)。
 
-- Profile Agent 降级实现：未配置密钥、超时、网络、内容安全拒绝、JSON 或 Schema 校验失败时使用 `development_heuristic`；真实成功使用冻结枚举 `llm_structured`。
-- Planner Agent 降级实现：相同故障条件下使用 `development_rule_based`；真实成功使用冻结枚举 `llm_structured`。当前知识库尚未接入，Planner 不声称已执行知识库检索。
-- Evaluation接口：当前明确返回501和 `mock=true`。
-- 五类资源Agent及Reviewer：当前未注册；不会返回假资源。
+## 资源格式修复与 fallback
 
-## Agent 2开发入口
+Quiz、MindMap 和 Reading 使用各自的私有 Draft，不改变公共 `Resource`：
 
-- 实现 `backend/app/rag`、`resources`、`guardrails`、`evaluation` 和课程数据。
-- 在 `backend/app/resources/registry.py` 暴露 `register_agents(registry)`。
-- 实现 `ResourceAgent.generate(SharedAgentContext) -> Resource` 和 `ReviewerAgent.review(...) -> Resource`。
-- 直接复用 `backend/app/schemas`，不得复制公共模型。
+- Quiz 固定生成 3 题：基础单选、进阶简答、挑战综合。
+- MindMap 的最终内容只保留 Mermaid `mindmap` 正文。
+- Reading 固定为概览、3 个核心要点、实践联系和后续学习。
 
-## Agent 3开发入口
+系统只归一化明确且安全的问题，例如单选标签、外层 Mermaid 代码围栏、换行和列表前缀。Quiz、MindMap、Reading 首次输出发生纯格式错误时，最多追加一次“只修复格式”的模型请求；网络、超时、安全或事实问题不会走格式修复。第二次仍失败时使用明确标记的 `development fallback`，随后仍接受公共 Schema 和 Reviewer 的完整校验。
 
-- API基地址：`http://127.0.0.1:8000/api`。
-- 画像字段读取 `value`、`evidence`、`confidence`。
-- 资源任务创建后连接返回的 `events_url`，按 `sequence` 去重并处理 `partial_success`。
-- 详细请求、响应和枚举以 `docs/api-spec.md` 与 `/openapi.json` 为准。
+Profile 和 Planner 对无效结构同样最多补发一次完整 JSON 修复请求，业务校验不放宽；再次失败或发生网络、超时、安全问题时立即使用既有显式降级。Profile 的降级模式为 `development_heuristic`，Planner 的降级模式为 `development_rule_based`。界面、资源个性化原因和安全日志会显示降级，便于演示时区分真实结果。
+
+## 文档
+
+- [API 契约](docs/api-spec.md)
+- [系统架构](docs/architecture.md)
+- [用户指南](docs/user-guide.md)
+- [测试报告](docs/test-report.md)
+- [演示脚本](docs/demo-script.md)
+- [开源软件与课程来源](docs/open-source-licenses.md)
+- [AI 编码工具使用声明](docs/ai-coding-tool-statement.md)

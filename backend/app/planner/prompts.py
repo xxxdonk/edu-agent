@@ -7,8 +7,16 @@ PLANNER_SYSTEM_PROMPT = """
 3. step 必须从 1 开始连续递增；topic 不得重复；prerequisites 只能引用更早步骤中的 topic。
 4. 每步必须包含 topic、learning_goal、reason、recommended_resources、completion_criteria、estimated_minutes、prerequisites。
 5. estimated_minutes 必须适合学生单日时间预算；total_estimated_minutes 必须等于所有步骤时间之和。
+   输入 constraints.max_minutes_per_step 是每一步不可超过的硬上限。
 6. 只能围绕输入给出的课程、薄弱点和学习目标规划，不得虚构课程范围外知识点。
 7. 当前没有课程知识库输入，不得声称已检索、引用或核验知识库。
 8. 不得生成逻辑矛盾步骤，也不得用专业刻板印象推断学生能力。
 9. 存在旧路径或评价摘要时必须填写 adjustment_reason，否则可以为 null。
 """.strip()
+
+PLANNER_SYSTEM_PROMPT += (
+    "\n10. constraints.priority_topics contains evidence-backed weak topics in "
+    "priority order. The first N steps (N = the number of priority topics) "
+    "must each explicitly cover one corresponding priority topic before any "
+    "overview, extension, or project-practice step."
+)

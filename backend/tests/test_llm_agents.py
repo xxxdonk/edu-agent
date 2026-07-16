@@ -473,6 +473,18 @@ def test_profile_invalid_json_or_schema_falls_back(fake_response) -> None:
     assert response.profile.major.value == "人工智能"
 
 
+def test_profile_repairs_one_invalid_structured_response() -> None:
+    fake = FakeLLMClient(["not-json", _complete_profile_draft()])
+
+    response = asyncio.run(
+        ProfileAgent(fake, enable_llm=True).extract(_complete_request(), None)
+    )
+
+    assert response.extraction_mode == "llm_structured"
+    assert len(fake.calls) == 2
+    assert "FORMAT REPAIR" in fake.calls[1]["system_prompt"]
+
+
 def test_profile_timeout_and_missing_client_fall_back(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING, logger="app.profile.agent")
     timed_out = asyncio.run(
@@ -527,11 +539,26 @@ def test_planner_invalid_response_falls_back() -> None:
     profile = _development_profile()
     invalid = _path_draft()
     invalid["steps"][1]["step"] = 3
+    fake = FakeLLMClient([invalid, invalid])
     path = asyncio.run(
-        PlannerAgent(FakeLLMClient([invalid]), enable_llm=True).generate(profile)
+        PlannerAgent(fake, enable_llm=True).generate(profile)
     )
     assert path.generation_mode == "development_rule_based"
     assert [step.step for step in path.steps] == list(range(1, len(path.steps) + 1))
+    assert len(fake.calls) == 2
+
+
+def test_planner_repairs_one_invalid_structured_response() -> None:
+    profile = _development_profile()
+    invalid = _path_draft()
+    invalid["steps"][1]["step"] = 3
+    fake = FakeLLMClient([invalid, _path_draft()])
+
+    path = asyncio.run(PlannerAgent(fake, enable_llm=True).generate(profile))
+
+    assert path.generation_mode == "llm_structured"
+    assert len(fake.calls) == 2
+    assert "FORMAT REPAIR" in fake.calls[1]["system_prompt"]
 
 
 def test_openai_compatible_client_rejects_missing_configuration_without_network() -> None:
