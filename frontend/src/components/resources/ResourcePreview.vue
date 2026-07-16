@@ -12,7 +12,7 @@
 import {computed, nextTick, onMounted, ref, watch} from 'vue';
 import hljs from 'highlight.js';
 import StatusBanner from '@/components/common/StatusBanner.vue';
-import {renderMarkdown} from '@/utils/content';
+import {normalizeMermaidContent, renderMarkdown} from '@/utils/content';
 import type {Resource} from '@/types/api';
 
 const props = defineProps<{resource: Resource}>();
@@ -31,11 +31,12 @@ async function renderMermaid() {
   try {
     const {default: mermaid} = await import('mermaid');
     mermaid.initialize({startOnLoad: false, securityLevel: 'strict', theme: 'neutral'});
-    const result = await mermaid.render(`eduagent-${props.resource.resource_id.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}`, props.resource.content);
+    const mermaidSource = normalizeMermaidContent(props.resource.content);
+    const result = await mermaid.render(`eduagent-${props.resource.resource_id.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}`, mermaidSource);
     if (mermaidHost.value) mermaidHost.value.innerHTML = result.svg;
   } catch {
     renderError.value = '思维导图渲染失败，已保留原始 Mermaid 内容供检查。';
-    if (mermaidHost.value) mermaidHost.value.textContent = props.resource.content;
+    if (mermaidHost.value) mermaidHost.value.textContent = normalizeMermaidContent(props.resource.content);
   }
 }
 
