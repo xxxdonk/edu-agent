@@ -16,6 +16,11 @@
         <el-tag v-if="modeLabel" :type="meta?.extraction_mode === 'llm_structured' ? 'success' : 'warning'" effect="plain">{{ modeLabel }}</el-tag>
         <span>更新于 {{ formatDate(profile.updated_at) }}</span>
       </div>
+      <StatusBanner
+        v-if="meta?.extraction_mode === 'development_heuristic'"
+        status="partial"
+        message="结构化 LLM 未成功完成，本轮启发式接管，精确原因见后端 profile_fallback 日志"
+      />
       <div v-if="meta?.missing_dimensions.length" class="missing-line">
         待补充：{{ meta.missing_dimensions.map(labelForKey).join('、') }}
       </div>

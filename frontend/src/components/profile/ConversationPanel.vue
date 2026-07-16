@@ -43,7 +43,7 @@
 </template>
 
 <script setup lang="ts">
-import {nextTick, ref, watch} from 'vue';
+import {nextTick, onBeforeUnmount, ref, watch} from 'vue';
 import {Loading, Promotion} from '@element-plus/icons-vue';
 import {useLearningStore} from '@/stores/learning';
 
@@ -66,4 +66,6 @@ watch(() => store.messages.length, async () => {
   await nextTick();
   if (scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
 });
+
+onBeforeUnmount(() => store.stopAssistantAnimation(true));
 </script>
