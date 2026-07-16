@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -168,35 +169,92 @@ def test_resources_generate_and_evaluation_with_agent2(
         if task["status"] in ("completed", "partial_success", "failed"):
             break
         _time.sleep(0.5)
-    assert task["status"] in ("completed", "partial_success"), f"task failed: {task.get('errors', [])}"
+    assert task["status"] == "completed", f"task failed: {task.get('errors', [])}"
     assert len(task["result_resource_ids"]) == 5
     # Each resource should be retrievable and have source_references
+    resources: dict[str, dict] = {}
     for resource_id in task["result_resource_ids"]:
         res = client.get(f"/api/resources/{resource_id}")
         assert res.status_code == 200
         resource = res.json()
+        resources[resource["resource_type"]] = resource
         assert len(resource["source_references"]) >= 1
-        assert resource["review_status"] in ("approved", "needs_revision")
+        assert resource["review_status"] == "approved"
 
     events = client.get(accepted_body["events_url"])
     assert events.status_code == 200
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: agent" in events.text
+    business_events = [
+        json.loads(line.removeprefix("data: "))
+        for line in events.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    sequences = [event["sequence"] for event in business_events]
+    assert sequences == list(range(1, len(sequences) + 1))
+    assert len(sequences) == len(set(sequences))
+    assert any(
+        event["agent"] == "retriever_agent" and event["status"] == "started"
+        for event in business_events
+    )
+    assert any(
+        event["agent"] == "retriever_agent" and event["status"] == "completed"
+        for event in business_events
+    )
+    terminal_event = business_events[-1]
+    assert terminal_event["event_type"] == "task"
+    assert terminal_event["status"] == task["status"]
 
+    resume_after = sequences[len(sequences) // 2]
+    resumed = client.get(
+        accepted_body["events_url"],
+        params={"after": resume_after - 1},
+        headers={"Last-Event-ID": str(resume_after)},
+    )
+    resumed_events = [
+        json.loads(line.removeprefix("data: "))
+        for line in resumed.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert resumed_events
+    assert all(event["sequence"] > resume_after for event in resumed_events)
+    assert resumed_events[-1]["status"] == task["status"]
+
+    quiz = json.loads(resources["quiz"]["content"])
+    first_question = quiz["questions"][0]
     evaluation = client.post(
         "/api/evaluation/submit",
         json={
             "student_id": saved_profile["student_id"],
             "path_id": saved_path["path_id"],
             "step": 1,
-            "answers": [{"question_id": "q-1", "response": "answer"}],
+            "answers": [
+                {
+                    "question_id": first_question["id"],
+                    "response": "这是一段很长但与题目和标准答案完全无关的错误回答。" * 6,
+                }
+            ],
             "time_spent_minutes": 5,
         },
     )
     assert evaluation.status_code == 200
     eval_body = evaluation.json()
     assert "mastery_score" in eval_body
-    assert "passed" in eval_body
+    assert eval_body["passed"] is False
+    assert eval_body["weak_topics"]
+    assert eval_body["profile_update_suggestions"]["evidence_source"] == "evaluation"
+    assert eval_body["profile_update_suggestions"]["updated_profile_version"] == saved_profile["version"] + 1
+    updated_path = eval_body["path_update_suggestions"]["updated_path"]
+    assert updated_path["profile_version"] == saved_profile["version"] + 1
+    assert updated_path["adjustment_reason"]
+
+    latest_profile = client.get(f"/api/profile/{saved_profile['student_id']}")
+    assert latest_profile.status_code == 200
+    assert latest_profile.json()["version"] == saved_profile["version"] + 1
+    assert any(
+        evidence["source"] == "evaluation"
+        for evidence in latest_profile.json()["weak_topics"]["evidence"]
+    )
 
 
 class _SuccessfulResourceAgent:
@@ -259,6 +317,13 @@ class _TrackingReviewer:
         return resource.model_copy(update={"review_status": "approved"})
 
 
+class _RejectingReviewer:
+    agent_name = "test_reviewer_agent"
+
+    async def review(self, resource: Resource, context) -> Resource:
+        return resource.model_copy(update={"review_status": "rejected"})
+
+
 def test_reviewer_runs_for_every_success_after_partial_generation(settings: Settings) -> None:
     app = create_app(settings)
     generation_log: list[str] = []
@@ -318,6 +383,59 @@ def test_reviewer_runs_for_every_success_after_partial_generation(settings: Sett
         completed_task = client.get(completed["status_url"]).json()
         assert completed_task["status"] == "completed"
         assert len(completed_task["result_resource_ids"]) == 2
+
+        failed = client.post(
+            "/api/resources/generate",
+            json={
+                "student_id": profile["student_id"],
+                "path_id": path["path_id"],
+                "step": 1,
+                "resource_types": ["quiz"],
+            },
+        ).json()
+        failed_task = client.get(failed["status_url"]).json()
+        assert failed_task["status"] == "failed"
+        assert failed_task["result_resource_ids"] == []
+
+
+def test_reviewer_rejection_never_publishes_resource_as_success(settings: Settings) -> None:
+    app = create_app(settings)
+    generation_log: list[str] = []
+    app.state.agent_registry.register_resource(
+        _SuccessfulResourceAgent(ResourceType.EXPLANATION, generation_log)
+    )
+    app.state.agent_registry.register_reviewer(_RejectingReviewer())
+
+    with TestClient(app) as client:
+        profile = client.post(
+            "/api/profile/chat",
+            json={
+                "student_id": "rejected-review-student",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "我是人工智能专业学生，正在学习机器学习，梯度下降不懂，希望完成分类项目，每天45分钟，喜欢代码和图示。",
+                    }
+                ],
+            },
+        ).json()["profile"]
+        path = client.post(
+            "/api/path/generate", json={"student_id": profile["student_id"]}
+        ).json()["path"]
+        accepted = client.post(
+            "/api/resources/generate",
+            json={
+                "student_id": profile["student_id"],
+                "path_id": path["path_id"],
+                "step": 1,
+                "resource_types": ["explanation"],
+            },
+        ).json()
+        task = client.get(accepted["status_url"]).json()
+
+        assert task["status"] == "failed"
+        assert task["result_resource_ids"] == []
+        assert any("review explanation:rejected" in error for error in task["errors"])
 
 
 def test_default_sqlite_path_is_independent_of_working_directory(

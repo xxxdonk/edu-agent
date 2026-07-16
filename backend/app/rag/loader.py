@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_CHAPTER_FILE_PATTERN = re.compile(r"^\d{2}-.+\.md$")
+
+
 @dataclass(slots=True)
 class DocumentChunk:
     chunk_id: str
@@ -27,6 +30,12 @@ def load_knowledge_base(data_dir: Path) -> list[DocumentChunk]:
     sources_path = data_dir / "sources.json"
     if sources_path.exists() and sources_path.stat().st_size > 0:
         chunks.extend(_load_sources(sources_path))
+
+    for chapter_path in sorted(data_dir.glob("*.md")):
+        if not _CHAPTER_FILE_PATTERN.match(chapter_path.name):
+            continue
+        text = chapter_path.read_text(encoding="utf-8")
+        chunks.extend(_chunk_chapter(text, chapter_path))
 
     return chunks
 
@@ -68,6 +77,50 @@ def _chunk_syllabus(text: str, path: Path) -> list[DocumentChunk]:
         )
 
     return chunks
+
+
+def _chunk_chapter(text: str, path: Path) -> list[DocumentChunk]:
+    text = _strip_front_matter(text)
+    title_match = re.search(r"^#\s+(.+)$", text, flags=re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else path.stem
+    chapter_number = path.name.split("-", maxsplit=1)[0]
+    source_id = f"ml-chapter-{chapter_number}"
+    sections = re.split(r"(?=^##\s+)", text, flags=re.MULTILINE)
+    chunks: list[DocumentChunk] = []
+
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        section_title_match = re.search(r"^##\s+(.+)$", section, flags=re.MULTILINE)
+        section_title = (
+            section_title_match.group(1).strip() if section_title_match else title
+        )
+        plain_text = re.sub(r"[#*_`\-]", "", section).strip()
+        if section_title == title and len(plain_text) <= len(title) + 5:
+            continue
+
+        content = section if section.startswith(f"# {title}") else f"# {title}\n\n{section}"
+        chunk_index = len(chunks) + 1
+        chunks.append(
+            DocumentChunk(
+                chunk_id=f"chapter-{chapter_number}-chunk-{chunk_index:03d}",
+                source_id=source_id,
+                title=title,
+                locator=f"data/machine_learning/{path.name}#{section_title}",
+                content=content,
+                topic_tags=list(
+                    dict.fromkeys([title, section_title, *_extract_topics(section)])
+                ),
+            )
+        )
+    return chunks
+
+
+def _strip_front_matter(text: str) -> str:
+    if not text.startswith("---"):
+        return text
+    return re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.DOTALL)
 
 
 def _load_sources(sources_path: Path) -> list[DocumentChunk]:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
+
 from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
 
-from .base import BaseResourceAgent
+from .base import BaseResourceAgent, ResourceDraftFormatError
+from .drafts import MindMapDraft
 
 
 class MindMapAgent(BaseResourceAgent):
@@ -22,25 +25,30 @@ class MindMapAgent(BaseResourceAgent):
         references: list[SourceReference],
     ) -> Resource:
         system_prompt = (
-            "你是一位知识图谱专家。根据提供的课程知识库，"
-            "生成一份 Mermaid mindmap 格式的思维导图。"
-            "根节点为课程主题，然后按概念层次逐级展开子节点。"
-            "难度与学生的 knowledge_level 匹配，"
-            "使用中文标签。"
+            "你是一位机器学习知识图谱专家。只依据课程知识库生成 Mermaid mindmap。"
+            "私有输出只有 content 一个字段；content 的第一行必须是 mindmap，"
+            "后续只包含一个主题根节点及分层子节点。"
+            "content 中不要包含 Markdown 代码围栏、解释文字、HTML 或来源元数据。"
+            "使用中文标签，节点内容必须能够由课程知识库支持。"
         )
-        user_content = (
-            f"主题：{topic}\n难度：{difficulty}\n"
-        )
+        user_content = f"主题：{topic}\n难度：{difficulty}\n"
         if rag_context:
             user_content += f"知识库参考：\n{rag_context}\n"
-        user_content += "请只输出 Mermaid mindmap 代码块。"
+        user_content += "请只在私有 JSON 的 content 字段中返回 Mermaid mindmap 正文。"
+        messages = [LLMMessage(role="user", content=user_content)]
 
-        draft = await self._llm_client.generate_structured(
+        return await self._generate_with_one_format_repair(
             system_prompt=system_prompt,
-            messages=[LLMMessage(role="user", content=user_content)],
-            response_model=Resource,
+            messages=messages,
+            response_model=MindMapDraft,
+            finalize=lambda draft: self._finalize_draft(
+                draft,
+                topic,
+                difficulty,
+                references,
+                context,
+            ),
         )
-        return self._finalize(draft, topic, difficulty, references, context)
 
     def _generate_heuristic(
         self,
@@ -53,65 +61,87 @@ class MindMapAgent(BaseResourceAgent):
     ) -> Resource:
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
-
-        lower = topic.lower()
-        mindmap = (
+        content = (
             "mindmap\n"
             f"  root(({topic} - {label}))\n"
-            f"    概念定义\n"
-            f"      直观理解\n"
-            f"      形式化定义\n"
-            f"    核心原理\n"
-            f"      数学基础\n"
-            f"      算法流程\n"
-            f"    应用场景\n"
-            f"      经典案例\n"
-            f"      实际项目\n"
-            f"    常见误区\n"
-            f"      易混淆概念\n"
-            f"      典型错误\n"
-            f"    关联知识\n"
-            f"      前置概念\n"
-            f"      后续进阶\n"
+            "    概念定义\n"
+            "      直观理解\n"
+            "      形式化定义\n"
+            "    核心原理\n"
+            "      数学基础\n"
+            "      算法流程\n"
+            "    应用场景\n"
+            "      经典案例\n"
+            "      实际项目\n"
+            "    常见误区\n"
+            "      易混淆概念\n"
+            "      典型错误\n"
+            "    关联知识\n"
+            "      前置概念\n"
+            "      后续进阶\n"
         )
-
-        content = f"```mermaid\n{mindmap}\n```\n"
         if rag_context:
-            content += f"\n<!-- 知识库参考片段已用于生成 -->\n"
-
-        return self._finalize(
-            Resource(
-                resource_id=self._make_resource_id(),
-                resource_type=self.resource_type,
-                title=f"{topic} 思维导图",
-                content=content,
-                content_format="mermaid",
-                target_topic=topic,
-                difficulty=Difficulty(difficulty),
-                personalization_reason=self._personalization_reason(context),
-                source_references=references or [],
-                review_status="pending",
-            ),
-            topic, difficulty, references, context,
+            content += "%% 知识库参考片段已用于生成\n"
+        return self._finalize_draft(
+            MindMapDraft(content=content),
+            topic,
+            difficulty,
+            references,
+            context,
         )
 
-    def _finalize(
+    def _finalize_draft(
         self,
-        draft: Resource,
+        draft: MindMapDraft,
         topic: str,
         difficulty: str,
         references: list[SourceReference],
         context: SharedAgentContext,
     ) -> Resource:
         return Resource(
-            resource_id=draft.resource_id or self._make_resource_id(),
+            resource_id=self._make_resource_id(),
             resource_type=ResourceType.MIND_MAP,
-            title=draft.title or f"{topic} 思维导图",
-            content=draft.content,
+            title=f"{topic} 思维导图",
+            content=self._normalize_mermaid(draft.content),
             content_format="mermaid",
             target_topic=topic,
-            difficulty=draft.difficulty or Difficulty(difficulty),
-            personalization_reason=draft.personalization_reason or self._personalization_reason(context),
-            source_references=references or draft.source_references,
+            difficulty=Difficulty(difficulty),
+            personalization_reason=self._personalization_reason(context),
+            source_references=references,
             review_status="pending",
         )
+
+    @staticmethod
+    def _normalize_mermaid(content: str) -> str:
+        cleaned = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").strip()
+        fenced = re.fullmatch(
+            r"```(?:mermaid)?\s*(.*?)\s*```",
+            cleaned,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if fenced:
+            cleaned = fenced.group(1).strip()
+
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().casefold() == "mermaid":
+            lines = lines[1:]
+        if not lines or lines[0].strip().casefold() != "mindmap":
+            raise ResourceDraftFormatError(
+                "mind map content must start with Mermaid mindmap"
+            )
+        lines[0] = "mindmap"
+        if not any(line.strip() and not line.lstrip().startswith("%%") for line in lines[1:]):
+            raise ResourceDraftFormatError("mind map content must include a root node")
+
+        normalized = "\n".join(lines)
+        brackets = {"{": "}", "[": "]", "(": ")"}
+        stack: list[str] = []
+        for character in normalized:
+            if character in brackets:
+                stack.append(brackets[character])
+            elif character in brackets.values():
+                if not stack or stack.pop() != character:
+                    raise ResourceDraftFormatError("mind map brackets are not balanced")
+        if stack:
+            raise ResourceDraftFormatError("mind map brackets are not balanced")
+        return normalized + "\n"

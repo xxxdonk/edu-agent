@@ -7,7 +7,13 @@ from collections.abc import Callable, Iterable
 
 from pydantic import ValidationError
 
-from app.llm import LLMClient, LLMError, LLMMessage
+from app.llm import (
+    LLMClient,
+    LLMError,
+    LLMMessage,
+    LLMResponseFormatError,
+    LLMValidationError,
+)
 from app.llm.errors import safe_error_summary
 from app.schemas.common import Difficulty, utc_now
 from app.schemas.profile import (
@@ -533,16 +539,7 @@ class ProfileAgent:
             response = self._fallback.extract(request, previous)
             return self._stabilize_next_question(response, request, previous)
         try:
-            draft = await self._llm_client.generate_structured(
-                system_prompt=PROFILE_SYSTEM_PROMPT,
-                messages=[
-                    LLMMessage(
-                        role="user",
-                        content=self._prompt_payload(request, previous),
-                    )
-                ],
-                response_model=ProfileExtractionDraft,
-            )
+            draft = await self._generate_draft(request, previous)
             self._validate_evidence(draft, request)
             response = self._build_response(draft, request, previous)
             return self._stabilize_next_question(response, request, previous)
@@ -553,6 +550,42 @@ class ProfileAgent:
             )
             response = self._fallback.extract(request, previous)
             return self._stabilize_next_question(response, request, previous)
+
+    async def _generate_draft(
+        self,
+        request: ProfileChatRequest,
+        previous: StudentProfile | None,
+    ) -> ProfileExtractionDraft:
+        prompt_payload = self._prompt_payload(request, previous)
+        for attempt in range(2):
+            system_prompt = PROFILE_SYSTEM_PROMPT
+            if attempt:
+                system_prompt += (
+                    "\nFORMAT REPAIR: Regenerate the complete JSON object once. "
+                    "Follow the schema exactly; do not add fields, commentary, "
+                    "or Markdown. Preserve traceable evidence quotations."
+                )
+            try:
+                draft = await self._llm_client.generate_structured(
+                    system_prompt=system_prompt,
+                    messages=[LLMMessage(role="user", content=prompt_payload)],
+                    response_model=ProfileExtractionDraft,
+                )
+                if attempt:
+                    logger.info("profile_format_repair success=true")
+                return draft
+            except (
+                LLMResponseFormatError,
+                LLMValidationError,
+                ValidationError,
+            ) as error:
+                if attempt:
+                    raise
+                logger.warning(
+                    "profile_format_repair requested=true error=%s",
+                    safe_error_summary(error),
+                )
+        raise LLMValidationError("profile format repair exhausted")
 
     @classmethod
     def _stabilize_next_question(
@@ -657,10 +690,34 @@ class ProfileAgent:
             "student_id": request.student_id,
             "conversation_id": request.conversation_id,
             "messages": [message.model_dump(mode="json") for message in request.messages],
-            "previous_profile": previous.model_dump(mode="json") if previous else None,
+            "previous_profile": (
+                ProfileAgent._compact_previous_profile(previous) if previous else None
+            ),
             "evaluation_summary": request.evaluation_summary,
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _compact_previous_profile(profile: StudentProfile) -> dict[str, object]:
+        """Keep values and provenance types without repeating evidence quotations."""
+
+        compact: dict[str, object] = {
+            "student_id": profile.student_id,
+            "version": profile.version,
+            "confidence": profile.confidence,
+        }
+        for field_name in DevelopmentProfileAgent._profile_field_names():
+            profile_field = getattr(profile, field_name)
+            compact[field_name] = {
+                "value": profile_field.value.model_dump(mode="json")
+                if isinstance(profile_field.value, TimeBudget)
+                else profile_field.value,
+                "confidence": profile_field.confidence,
+                "evidence_sources": sorted(
+                    {evidence.source for evidence in profile_field.evidence}
+                ),
+            }
+        return compact
 
     @staticmethod
     def _validate_evidence(

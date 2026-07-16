@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import logging
 import ast
+import json
+import logging
+import re
+import textwrap
 
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType
-from app.schemas.common import Difficulty
 from app.guardrails.checker import GuardrailChecker
 
 logger = logging.getLogger(__name__)
@@ -18,7 +20,7 @@ class ReviewerAgent:
         self,
         resource: Resource,
         context: SharedAgentContext,
-    ) -> tuple[Resource, dict]:
+    ) -> Resource:
         issues: list[str] = []
 
         # 原有 5 项检查
@@ -26,6 +28,7 @@ class ReviewerAgent:
         self._check_difficulty_match(resource, context, issues)
         self._check_personalization(resource, context, issues)
         self._check_content_integrity(resource, issues)
+        self._check_placeholders(resource, issues)
         self._check_resource_type_format(resource, issues)
 
         # 新增 4 项检查
@@ -39,10 +42,17 @@ class ReviewerAgent:
         if not guardrail_ok:
             issues.extend(guardrail_issues)
 
-        # 计算各项评分
+        # 评分仅进入安全日志，不改变公共 Resource Schema。
         source_coverage = self._compute_source_coverage(resource)
         personalization_score = self._compute_personalization_score(resource, context)
         factuality_score = self._compute_factuality_score(resource)
+        logger.debug(
+            "review_scores resource_id=%s source_coverage=%.2f personalization=%.2f factuality=%.2f",
+            resource.resource_id,
+            source_coverage,
+            personalization_score,
+            factuality_score,
+        )
 
         # 确定状态
         if guardrail_issues:
@@ -51,18 +61,6 @@ class ReviewerAgent:
             status = "needs_revision"
         else:
             status = "approved"
-
-        # 构建修正内容（如有可修复问题）
-        corrected_content = self._generate_corrected_content(resource, issues) if issues else None
-
-        review_dict = {
-            "status": status,
-            "issues": issues,
-            "corrected_content": corrected_content,
-            "source_coverage": source_coverage,
-            "personalization_score": personalization_score,
-            "factuality_score": factuality_score,
-        }
 
         if status == "rejected":
             logger.warning("review_rejected resource_id=%s issues=%s", resource.resource_id, guardrail_issues)
@@ -74,7 +72,7 @@ class ReviewerAgent:
                         + f" [审校拒绝：{'；'.join(guardrail_issues)}]"
                     ),
                 }
-            ), review_dict
+            )
 
         if status == "needs_revision":
             logger.warning("review_issues resource_id=%s issues=%s", resource.resource_id, issues)
@@ -86,9 +84,9 @@ class ReviewerAgent:
                         + f" [审校问题：{'；'.join(issues)}]"
                     ),
                 }
-            ), review_dict
+            )
 
-        return resource.model_copy(update={"review_status": "approved"}), review_dict
+        return resource.model_copy(update={"review_status": "approved"})
 
     # ========== 原有 5 项检查 ==========
 
@@ -134,6 +132,21 @@ class ReviewerAgent:
             issues.append("内容过短，可能不完整")
         if not resource.title or len(resource.title) < 3:
             issues.append("标题过短或缺失")
+
+    @staticmethod
+    def _check_placeholders(resource: Resource, issues: list[str]) -> None:
+        placeholder_patterns = (
+            "待补充",
+            "在此处实现",
+            "选项一（正确描述）",
+            "……",
+        )
+        matched = [pattern for pattern in placeholder_patterns if pattern in resource.content]
+        lowered = resource.content.casefold()
+        if re.search(r"\b(?:todo|tbd|fixme)\b", lowered):
+            matched.append("TODO/TBD/FIXME")
+        if matched:
+            issues.append(f"内容包含占位符：{'、'.join(dict.fromkeys(matched))}")
 
     @staticmethod
     def _check_resource_type_format(resource: Resource, issues: list[str]) -> None:
@@ -233,7 +246,10 @@ class ReviewerAgent:
         parse_errors = []
         for i, code in enumerate(code_blocks):
             try:
-                ast.parse(code)
+                # Markdown renderers commonly indent an entire fenced block.
+                # Remove only that shared presentation indentation; genuine
+                # relative-indentation and syntax errors remain detectable.
+                ast.parse(textwrap.dedent(code))
             except SyntaxError as e:
                 parse_errors.append(f"代码块 {i+1} 语法错误：{e.msg} (行 {e.lineno})")
 
@@ -247,6 +263,44 @@ class ReviewerAgent:
             return
 
         content = resource.content
+        if resource.content_format == "json":
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                issues.append("Quiz JSON 无法解析")
+                return
+            questions = payload.get("questions") if isinstance(payload, dict) else None
+            if not isinstance(questions, list) or not questions:
+                issues.append("Quiz JSON 缺少非空 questions 数组")
+                return
+            for index, question in enumerate(questions, start=1):
+                if not isinstance(question, dict):
+                    issues.append(f"Quiz 第 {index} 题不是对象")
+                    continue
+                missing = [
+                    field
+                    for field in ("question", "answer", "explanation")
+                    if not str(question.get(field, "")).strip()
+                ]
+                if missing:
+                    issues.append(
+                        f"Quiz 第 {index} 题缺少必要字段：{'、'.join(missing)}"
+                    )
+                if question.get("type") == "single_choice":
+                    options = question.get("options")
+                    if not isinstance(options, list) or len(options) < 2:
+                        issues.append(f"Quiz 第 {index} 题缺少有效选项")
+                    else:
+                        answer = str(question.get("answer", "")).strip().upper()
+                        option_labels = {
+                            str(option).strip().split(".", maxsplit=1)[0].upper()
+                            for option in options
+                            if str(option).strip()
+                        }
+                        if answer and answer not in option_labels:
+                            issues.append(f"Quiz 第 {index} 题答案不在选项中")
+            return
+
         content_lower = content.lower()
 
         # 基本检查：内容中至少需要包含 question / answer / explanation

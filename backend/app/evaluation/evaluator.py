@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-import logging
+import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from uuid import uuid4
 
-from app.schemas import EvaluationResult, EvaluationSubmission
+from app.database import Repository
+from app.schemas import EvaluationResult, EvaluationSubmission, ResourceType
 
-logger = logging.getLogger(__name__)
+
+class EvaluationValidationError(ValueError):
+    """The submitted answer set cannot be matched to the generated quiz."""
+
+
+class EvaluationQuestionNotFoundError(LookupError):
+    """A referenced persisted quiz or question does not exist."""
 
 
 @dataclass(slots=True)
@@ -16,62 +25,73 @@ class _QuestionMeta:
     topic: str
     correct_answer: str
     points: float
+    question_type: str
 
 
 class EvaluationAgent:
+    """Grade answers against the persisted Quiz resource answer key."""
+
     agent_name = "evaluation_agent"
+
+    def __init__(self, repository: Repository) -> None:
+        self._repository = repository
 
     async def evaluate(
         self,
         submission: EvaluationSubmission,
+        *,
+        expected_topic: str,
     ) -> tuple[EvaluationResult, dict, dict]:
+        answer_ids = [answer.question_id for answer in submission.answers]
+        if len(answer_ids) != len(set(answer_ids)):
+            raise EvaluationValidationError("question_id must not be submitted more than once")
+
         total_score = 0.0
         max_score = 0.0
         weak_topics: list[str] = []
         feedback_parts: list[str] = []
 
         for answer in submission.answers:
-            # 动态解析题目元数据，不再硬编码
-            question_meta = self._resolve_question(answer.question_id, answer.response)
+            question_meta = self._resolve_question(
+                answer.question_id,
+                student_id=submission.student_id,
+                expected_topic=expected_topic,
+            )
             max_score += question_meta.points
+            fraction = self._score_answer(answer.response, question_meta)
+            total_score += question_meta.points * fraction
 
-            if self._is_correct(answer.response, question_meta.correct_answer):
-                total_score += question_meta.points
-                feedback_parts.append(f"题目 {answer.question_id}：正确 ✓")
-            elif self._is_partial(answer.response, question_meta.correct_answer):
-                total_score += question_meta.points * 0.3
+            if fraction >= 1.0:
+                feedback_parts.append(f"题目 {answer.question_id}：正确")
+            elif fraction > 0:
                 feedback_parts.append(
-                    f"题目 {answer.question_id}：部分正确 / 需要复习 {question_meta.topic}"
+                    f"题目 {answer.question_id}：部分正确，需要复习 {question_meta.topic}"
                 )
                 weak_topics.append(question_meta.topic)
             else:
-                # 完全错误：0 分
                 feedback_parts.append(
-                    f"题目 {answer.question_id}：错误 / 需要重点复习 {question_meta.topic}"
+                    f"题目 {answer.question_id}：回答不正确，需要重点复习 {question_meta.topic}"
                 )
                 weak_topics.append(question_meta.topic)
 
         mastery_score = round(total_score / max(max_score, 1.0), 4)
         passed = mastery_score >= 0.6
         weak_topics_deduped = list(dict.fromkeys(weak_topics))
-
         feedback = "\n".join(feedback_parts)
         if passed:
-            feedback += f"\n\n总体评价：通过（掌握度 {mastery_score:.0%}）"
+            feedback += f"\n\n总体评价：通过（掌握度 {mastery_score:.0%}）。"
         else:
+            topics = "、".join(weak_topics_deduped) or expected_topic
             feedback += (
                 f"\n\n总体评价：未通过（掌握度 {mastery_score:.0%}），"
-                f"建议重点复习：{'、'.join(weak_topics_deduped)}"
+                f"建议重点复习：{topics}。"
             )
 
-        # 构建画像更新建议
         profile_update_suggestions = self._build_profile_updates(
             submission, mastery_score, passed, weak_topics_deduped
         )
-
-        # 构建学习路径调整建议
         path_update_suggestions = self._build_path_updates(
-            submission, mastery_score, passed, weak_topics_deduped
+            mastery_score, passed, weak_topics_deduped
         )
 
         return (
@@ -84,95 +104,130 @@ class EvaluationAgent:
                 passed=passed,
                 weak_topics=weak_topics_deduped,
                 feedback=feedback,
-                profile_update_required=not passed,
-                path_update_required=not passed,
+                profile_update_required=not passed or bool(weak_topics_deduped),
+                path_update_required=not passed or bool(weak_topics_deduped),
             ),
             profile_update_suggestions,
             path_update_suggestions,
         )
 
-    @staticmethod
-    def _resolve_question(question_id: str, response: str) -> _QuestionMeta:
-        """动态判定题目元数据——从题目 ID 和答案中推断，不再使用硬编码默认值。
+    def _resolve_question(
+        self,
+        question_id: str,
+        *,
+        student_id: str,
+        expected_topic: str,
+    ) -> _QuestionMeta:
+        resource_id, separator, local_question_id = question_id.partition("::")
+        if not separator or not resource_id or not local_question_id:
+            raise EvaluationValidationError(
+                "question_id is not bound to a persisted quiz resource"
+            )
 
-        根据 question_id 的命名惯例推断 topic 和 level:
-        - 包含 'basic' / 'fundamental' → basic
-        - 包含 'intermediate' / 'medium' → intermediate
-        - 包含 'advanced' / 'hard' → advanced
-        - 否则 → basic
-        """
-        qid_lower = question_id.lower()
+        resource = self._repository.get_resource(resource_id)
+        if resource is None:
+            raise EvaluationQuestionNotFoundError(f"quiz resource not found: {resource_id}")
+        if resource.resource_type != ResourceType.QUIZ:
+            raise EvaluationValidationError("question_id does not reference a quiz resource")
+        if self._resource_student_id(resource_id) != student_id:
+            raise EvaluationValidationError("quiz resource does not belong to student_id")
+        if self._normalize_text(resource.target_topic) != self._normalize_text(expected_topic):
+            raise EvaluationValidationError("quiz resource does not belong to the submitted path step")
 
-        # 推断难度
-        if any(kw in qid_lower for kw in ("advanced", "hard", "综合", "complex")):
-            level = "advanced"
-        elif any(kw in qid_lower for kw in ("intermediate", "medium", "mid", "应用")):
-            level = "intermediate"
-        else:
-            level = "basic"
+        document = self._parse_quiz_document(resource.content)
+        question = next(
+            (
+                item
+                for item in document["questions"]
+                if isinstance(item, dict)
+                and str(item.get("id") or "") in {question_id, local_question_id}
+            ),
+            None,
+        )
+        if question is None:
+            raise EvaluationQuestionNotFoundError(f"quiz question not found: {question_id}")
+        correct_answer = str(question.get("answer") or "").strip()
+        if not correct_answer:
+            raise EvaluationValidationError("quiz question has no persisted answer key")
 
-        # 推断知识点
-        topic_keywords = {
-            "overview": "机器学习概述",
-            "linear": "线性回归",
-            "logistic": "逻辑回归",
-            "tree": "决策树",
-            "svm": "支持向量机",
-            "cluster": "聚类",
-            "nn": "神经网络基础",
-            "neural": "神经网络基础",
-            "eval": "模型评估与过拟合",
-            "metric": "模型评估与过拟合",
-            "过拟合": "模型评估与过拟合",
-        }
-        topic = "综合"
-        for key, val in topic_keywords.items():
-            if key in qid_lower:
-                topic = val
-                break
-
-        # 根据 response 长度和质量推断分值
-        response_clean = response.strip()
-        if len(response_clean) > 200:
-            points = 5.0
-        elif len(response_clean) > 50:
-            points = 3.0
-        else:
-            points = 2.0
-
+        level = str(question.get("level") or "basic").lower()
+        points = {"basic": 1.0, "intermediate": 2.0, "advanced": 3.0}.get(level, 1.0)
         return _QuestionMeta(
             question_id=question_id,
             level=level,
-            topic=topic,
-            correct_answer="",  # 动态判题模式下不预设答案
+            topic=resource.target_topic,
+            correct_answer=correct_answer,
             points=points,
+            question_type=str(question.get("type") or "short_answer").lower(),
         )
 
-    @staticmethod
-    def _is_correct(response: str, correct_answer: str) -> bool:
-        """判断答案是否正确"""
-        response_clean = response.strip().lower().replace(" ", "")
-        if not correct_answer:
-            # 动态模式：根据长度和关键词做启发式判断
-            return len(response_clean) > 50 and len(response_clean) < 5000
-
-        correct_clean = correct_answer.strip().lower().replace(" ", "")
-        if response_clean == correct_clean:
-            return True
-        return correct_clean in response_clean[:100]
+    def _resource_student_id(self, resource_id: str) -> str | None:
+        with self._repository.database.connect() as connection:
+            row = connection.execute(
+                "SELECT task_id FROM resources WHERE resource_id = ?",
+                (resource_id,),
+            ).fetchone()
+        if not row or not row["task_id"]:
+            return None
+        task = self._repository.get_task(str(row["task_id"]))
+        return task.student_id if task else None
 
     @staticmethod
-    def _is_partial(response: str, correct_answer: str) -> bool:
-        """判断答案是否部分正确（有内容但不够完整）"""
-        response_clean = response.strip().lower().replace(" ", "")
-        if not correct_answer:
-            # 动态模式：有实质内容但不够完整
-            return 10 < len(response_clean) <= 50
-        # 有预设答案时：答案中有部分匹配
-        correct_clean = correct_answer.strip().lower().replace(" ", "")
-        return len(response_clean) > 5 and not (
-            response_clean == correct_clean or correct_clean in response_clean[:100]
-        )
+    def _parse_quiz_document(content: str) -> dict:
+        cleaned = content.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+        if fenced:
+            cleaned = fenced.group(1).strip()
+        try:
+            document = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise EvaluationValidationError("persisted quiz content is invalid JSON") from exc
+        if not isinstance(document, dict) or not isinstance(document.get("questions"), list):
+            raise EvaluationValidationError("persisted quiz has no questions array")
+        return document
+
+    @classmethod
+    def _score_answer(cls, response: str, question: _QuestionMeta) -> float:
+        response_clean = cls._normalize_text(response)
+        correct_clean = cls._normalize_text(question.correct_answer)
+        if not response_clean:
+            return 0.0
+
+        if question.question_type == "single_choice":
+            response_choice = cls._choice_letter(response)
+            correct_choice = cls._choice_letter(question.correct_answer)
+            if response_choice and correct_choice:
+                return 1.0 if response_choice == correct_choice else 0.0
+
+        if response_clean == correct_clean or correct_clean in response_clean:
+            return 1.0
+
+        expected_units = cls._character_bigrams(correct_clean)
+        response_units = cls._character_bigrams(response_clean)
+        if not expected_units:
+            return 0.0
+        coverage = len(expected_units & response_units) / len(expected_units)
+        if coverage >= 0.65:
+            return 1.0
+        if coverage >= 0.25:
+            return 0.5
+        return 0.0
+
+    @staticmethod
+    def _choice_letter(value: str) -> str | None:
+        match = re.search(r"(?:^|\b)([A-H])(?:\b|[.、:：])", value.strip().upper())
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value).lower()
+        return "".join(character for character in normalized if character.isalnum())
+
+    @staticmethod
+    def _character_bigrams(value: str) -> set[str]:
+        if len(value) < 2:
+            return {value} if value else set()
+        return {value[index : index + 2] for index in range(len(value) - 1)}
 
     @staticmethod
     def _build_profile_updates(
@@ -181,91 +236,46 @@ class EvaluationAgent:
         passed: bool,
         weak_topics: list[str],
     ) -> dict:
-        """构建画像更新建议"""
-        # 薄弱知识点
-        weak_topics_list = weak_topics if weak_topics else []
-
-        # 知识水平调整建议
         if mastery_score >= 0.85:
             knowledge_level_adjustment = "advanced"
         elif mastery_score >= 0.6:
             knowledge_level_adjustment = "intermediate"
         else:
-            knowledge_level_adjustment = "basic"
+            knowledge_level_adjustment = "beginner"
 
-        # 认知风格证据
         cognitive_style_evidence = None
-        time_spent = submission.time_spent_minutes
-        num_answers = len(submission.answers)
-        if time_spent > 0 and num_answers > 0:
-            avg_time = time_spent / num_answers
-            if avg_time < 1:
-                cognitive_style_evidence = "快速作答风格：学生倾向于直觉反应而非深入分析"
-            elif avg_time > 10:
-                cognitive_style_evidence = "深思熟虑风格：学生花费较长时间仔细推敲答案"
-
-        # 资源偏好调整
-        resource_preference_adjustment = None
-        if not passed:
-            if weak_topics:
-                resource_preference_adjustment = [
-                    f"建议增加 {t} 相关的练习和解释类资源" for t in weak_topics[:3]
-                ]
+        if submission.answers and submission.time_spent_minutes > 0:
+            average_minutes = submission.time_spent_minutes / len(submission.answers)
+            if average_minutes < 1:
+                cognitive_style_evidence = "评价显示作答速度较快，建议增加推导与检查步骤"
+            elif average_minutes > 10:
+                cognitive_style_evidence = "评价显示单题思考时间较长，建议提供分步提示"
 
         return {
-            "weak_topics": weak_topics_list,
+            "weak_topics": weak_topics,
             "knowledge_level_adjustment": knowledge_level_adjustment,
             "cognitive_style_evidence": cognitive_style_evidence,
-            "resource_preference_adjustment": resource_preference_adjustment,
+            "resource_preference_adjustment": (
+                [f"增加 {topic} 的代码示例、图示和分层练习" for topic in weak_topics[:3]]
+                if not passed
+                else None
+            ),
+            "evidence_source": "evaluation",
         }
 
     @staticmethod
     def _build_path_updates(
-        submission: EvaluationSubmission,
         mastery_score: float,
         passed: bool,
         weak_topics: list[str],
     ) -> dict:
-        """构建学习路径调整建议"""
-        revisit_topics = weak_topics if weak_topics else []
-
-        # 建议的下一步话题
-        next_topics_map = {
-            "机器学习概述": ["线性回归"],
-            "线性回归": ["逻辑回归"],
-            "逻辑回归": ["决策树", "支持向量机"],
-            "决策树": ["支持向量机", "聚类"],
-            "支持向量机": ["聚类", "神经网络基础"],
-            "聚类": ["神经网络基础"],
-            "神经网络基础": ["模型评估与过拟合"],
-            "模型评估与过拟合": [],
-        }
-        next_topics_all: list[str] = []
-        for topic in weak_topics if passed else (weak_topics or ["机器学习概述"]):
-            next_topics_all.extend(next_topics_map.get(topic, []))
-
-        next_topics = list(dict.fromkeys(next_topics_all))  # 去重保序
-
-        # 优先级调整说明
-        if passed:
-            priority_adjustment = "学生已通过当前阶段评估，可按原路径继续推进"
-        else:
-            priority_adjustment = (
-                f"学生未通过评估（掌握度 {mastery_score:.0%}），"
-                f"建议优先复习薄弱知识点后再进入下一阶段"
-            )
-
-        # 建议额外学习时间
-        if mastery_score >= 0.8:
-            estimated_extra = 15
-        elif mastery_score >= 0.6:
-            estimated_extra = 30
-        else:
-            estimated_extra = 60
-
         return {
-            "revisit_topics": revisit_topics,
-            "next_topics": next_topics,
-            "priority_adjustment": priority_adjustment,
-            "estimated_extra_minutes": estimated_extra,
+            "revisit_topics": weak_topics,
+            "next_topics": [] if weak_topics else ["下一学习路径步骤"],
+            "priority_adjustment": (
+                "当前评价已通过，可按原路径继续推进"
+                if passed and not weak_topics
+                else f"掌握度 {mastery_score:.0%}，应先复习评价识别出的薄弱知识点"
+            ),
+            "estimated_extra_minutes": 15 if mastery_score >= 0.8 else 30 if mastery_score >= 0.6 else 60,
         }

@@ -7,7 +7,13 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.llm import LLMClient, LLMError, LLMMessage, LLMValidationError
+from app.llm import (
+    LLMClient,
+    LLMError,
+    LLMMessage,
+    LLMResponseFormatError,
+    LLMValidationError,
+)
 from app.llm.errors import safe_error_summary
 from app.schemas import LearningPath, LearningPathStep, ResourceType, StudentProfile
 from app.schemas.common import Difficulty, utc_now
@@ -172,22 +178,12 @@ class PlannerAgent:
                 evaluation_summary=evaluation_summary,
             )
         try:
-            draft = await self._llm_client.generate_structured(
-                system_prompt=PLANNER_SYSTEM_PROMPT,
-                messages=[
-                    LLMMessage(
-                        role="user",
-                        content=self._prompt_payload(
-                            profile,
-                            previous_path,
-                            evaluation_summary,
-                            target_topics,
-                        ),
-                    )
-                ],
-                response_model=LearningPathDraft,
+            draft = await self._generate_validated_draft(
+                profile,
+                previous_path,
+                evaluation_summary,
+                target_topics,
             )
-            self._validate_draft(draft, profile)
             adjustment_reason = draft.adjustment_reason
             if not adjustment_reason and (previous_path or evaluation_summary):
                 adjustment_reason = (
@@ -213,6 +209,50 @@ class PlannerAgent:
                 evaluation_summary=evaluation_summary,
             )
 
+    async def _generate_validated_draft(
+        self,
+        profile: StudentProfile,
+        previous_path: LearningPath | None,
+        evaluation_summary: str | None,
+        target_topics: list[str] | None,
+    ) -> LearningPathDraft:
+        prompt_payload = self._prompt_payload(
+            profile,
+            previous_path,
+            evaluation_summary,
+            target_topics,
+        )
+        for attempt in range(2):
+            system_prompt = PLANNER_SYSTEM_PROMPT
+            if attempt:
+                system_prompt += (
+                    "\nFORMAT REPAIR: Regenerate the complete JSON object once. "
+                    "Follow the schema and every constraint exactly; do not add "
+                    "fields, commentary, or Markdown."
+                )
+            try:
+                draft = await self._llm_client.generate_structured(
+                    system_prompt=system_prompt,
+                    messages=[LLMMessage(role="user", content=prompt_payload)],
+                    response_model=LearningPathDraft,
+                )
+                self._validate_draft(draft, profile)
+                if attempt:
+                    logger.info("planner_format_repair success=true")
+                return draft
+            except (
+                LLMResponseFormatError,
+                LLMValidationError,
+                ValidationError,
+            ) as error:
+                if attempt:
+                    raise
+                logger.warning(
+                    "planner_format_repair requested=true error=%s",
+                    safe_error_summary(error),
+                )
+        raise LLMValidationError("planner format repair exhausted")
+
     @staticmethod
     def _prompt_payload(
         profile: StudentProfile,
@@ -221,14 +261,79 @@ class PlannerAgent:
         target_topics: list[str] | None,
     ) -> str:
         payload = {
-            "profile": profile.model_dump(mode="json"),
+            "profile": PlannerAgent._compact_profile(profile),
             "course": profile.course.value or "机器学习基础",
-            "previous_path": previous_path.model_dump(mode="json") if previous_path else None,
+            "constraints": {
+                "max_minutes_per_step": (
+                    profile.time_budget.value.minutes_per_day
+                    if profile.time_budget.value
+                    else 45
+                ),
+                "priority_topics": list(profile.weak_topics.value),
+                "step_numbers_must_be_contiguous": True,
+                "topics_must_be_unique": True,
+            },
+            "previous_path": (
+                PlannerAgent._compact_previous_path(previous_path)
+                if previous_path
+                else None
+            ),
             "evaluation_summary": evaluation_summary,
             "target_topics": target_topics or [],
             "knowledge_base_available": False,
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _compact_profile(profile: StudentProfile) -> dict[str, object]:
+        compact: dict[str, object] = {
+            "student_id": profile.student_id,
+            "version": profile.version,
+            "confidence": profile.confidence,
+        }
+        for field_name in (
+            "major",
+            "course",
+            "knowledge_level",
+            "learning_goals",
+            "weak_topics",
+            "learning_history",
+            "cognitive_style",
+            "language_preference",
+            "resource_preference",
+            "time_budget",
+        ):
+            profile_field = getattr(profile, field_name)
+            value = profile_field.value
+            compact[field_name] = {
+                "value": value.model_dump(mode="json")
+                if hasattr(value, "model_dump")
+                else value,
+                "confidence": profile_field.confidence,
+            }
+        return compact
+
+    @staticmethod
+    def _compact_previous_path(path: LearningPath) -> dict[str, object]:
+        return {
+            "path_id": path.path_id,
+            "profile_version": path.profile_version,
+            "course": path.course,
+            "status": path.status,
+            "steps": [
+                {
+                    "step": step.step,
+                    "topic": step.topic,
+                    "learning_goal": step.learning_goal,
+                    "completion_criteria": step.completion_criteria,
+                    "estimated_minutes": step.estimated_minutes,
+                    "prerequisites": step.prerequisites,
+                }
+                for step in path.steps
+            ],
+            "adjustment_reason": path.adjustment_reason,
+            "generation_mode": path.generation_mode,
+        }
 
     @staticmethod
     def _validate_draft(

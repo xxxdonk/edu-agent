@@ -29,7 +29,12 @@
         </div>
       </el-tab-pane>
       <el-tab-pane name="path" label="个性化学习路径工作区">
-        <LearningPathPanel v-model="store.selectedStep" :path="store.path" :status="store.pathStatus" />
+        <LearningPathPanel
+          :model-value="store.selectedStep"
+          :path="store.path"
+          :status="store.pathStatus"
+          @update:model-value="store.selectStep"
+        />
       </el-tab-pane>
       <el-tab-pane name="resources" label="资源中心与学习评价">
         <div class="workspace-grid workspace-grid--resources">

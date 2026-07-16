@@ -14,24 +14,35 @@ export function connectTaskEvents(eventsUrl: string, handlers: StreamHandlers): 
   let stopped = false;
   let lastSequence = 0;
   let retries = 0;
-  let reconnectTimer: number | null = null;
+  let terminalNotified = false;
+  let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+
+  const notifyTerminal = () => {
+    if (terminalNotified) return;
+    terminalNotified = true;
+    stopped = true;
+    source?.close();
+    if (reconnectTimer !== null) globalThis.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    handlers.onTerminal();
+  };
 
   const open = () => {
+    if (stopped) return;
     const url = new URL(absoluteApiUrl(eventsUrl));
     if (lastSequence > 0) url.searchParams.set('after', String(lastSequence));
     source = new EventSource(url);
 
     const handle = (message: MessageEvent<string>) => {
+      if (stopped) return;
       try {
         const event = JSON.parse(message.data) as TaskEvent;
+        retries = 0;
         if (event.sequence <= lastSequence) return;
         lastSequence = event.sequence;
-        retries = 0;
         handlers.onEvent(event);
-        if (terminalStatuses.has(event.status)) {
-          stopped = true;
-          source?.close();
-          handlers.onTerminal();
+        if (event.event_type === 'task' && terminalStatuses.has(event.status)) {
+          notifyTerminal();
         }
       } catch {
         handlers.onError('收到一条无法解析的智能体进度消息，已跳过该事件。');
@@ -46,12 +57,15 @@ export function connectTaskEvents(eventsUrl: string, handlers: StreamHandlers): 
       source?.close();
       if (stopped) return;
       if (retries >= 3) {
+        stopped = true;
         handlers.onError('智能体进度连接已中断，正在通过任务状态保留已有结果。');
-        handlers.onTerminal();
         return;
       }
       retries += 1;
-      reconnectTimer = window.setTimeout(open, retries * 1000);
+      reconnectTimer = globalThis.setTimeout(() => {
+        reconnectTimer = null;
+        open();
+      }, retries * 1000);
     };
   };
 
@@ -59,6 +73,7 @@ export function connectTaskEvents(eventsUrl: string, handlers: StreamHandlers): 
   return () => {
     stopped = true;
     source?.close();
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    if (reconnectTimer !== null) globalThis.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   };
 }

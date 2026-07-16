@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import TypeVar
 from uuid import uuid4
 
-from app.llm import LLMClient, LLMMessage
+from pydantic import BaseModel, ValidationError
+
+from app.llm import (
+    LLMClient,
+    LLMError,
+    LLMMessage,
+    LLMResponseFormatError,
+    LLMValidationError,
+)
 from app.orchestrator import SharedAgentContext
 from app.rag import KnowledgeRetriever
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
 
-_FALLBACK_REFERENCE = SourceReference(
-    source_id="ml-syllabus",
-    title="机器学习基础课程大纲",
-    locator="data/machine_learning/syllabus.md",
-    chunk_id="fallback",
-)
+logger = logging.getLogger(__name__)
+
+DraftModel = TypeVar("DraftModel", bound=BaseModel)
+
+
+class ResourceDraftFormatError(ValueError):
+    """A safe, model-correctable resource draft format failure."""
 
 
 class BaseResourceAgent(ABC):
@@ -40,15 +52,142 @@ class BaseResourceAgent(ABC):
         topic = step.topic
         difficulty = context.profile.knowledge_level.value or Difficulty.BEGINNER
 
-        rag_chunks = self._retriever.retrieve(topic, difficulty=difficulty)
+        self._emit_retrieval_event(
+            context,
+            status="started",
+            progress=10,
+            message="Retriever Agent 开始检索课程知识库",
+        )
+        try:
+            rag_chunks = self._retriever.retrieve(topic, difficulty=difficulty)
+        except Exception as error:
+            self._emit_retrieval_event(
+                context,
+                status="failed",
+                progress=15,
+                message="Retriever Agent 检索课程知识库失败",
+                error=f"retrieval_error:{type(error).__name__}",
+            )
+            raise
         references = self._retriever.to_source_references(rag_chunks)
         if not references:
-            references = [_FALLBACK_REFERENCE]
+            self._emit_retrieval_event(
+                context,
+                status="failed",
+                progress=15,
+                message="Retriever Agent 未找到可核验的课程依据",
+                error="no_reliable_knowledge_source",
+            )
+            raise ValueError(f"知识库中没有可核验的主题依据：{topic}")
+        self._emit_retrieval_event(
+            context,
+            status="completed",
+            progress=15,
+            message=f"Retriever Agent 完成检索，命中 {len(references)} 个课程片段",
+        )
         rag_context = self._build_rag_context(rag_chunks)
 
         if self._enable_llm and self._llm_client is not None:
-            return await self._generate_with_llm(context, step, topic, difficulty, rag_context, references)
-        return self._generate_heuristic(context, step, topic, difficulty, rag_context, references)
+            try:
+                generated = await self._generate_with_llm(
+                    context,
+                    step,
+                    topic,
+                    difficulty,
+                    rag_context,
+                    references,
+                )
+                return self._ensure_profile_personalization(generated, context)
+            except (LLMError, ValidationError, ResourceDraftFormatError) as error:
+                reason = getattr(error, "code", type(error).__name__)
+                logger.warning(
+                    "resource_llm_fallback agent=%s reason=%s",
+                    self.agent_name,
+                    reason,
+                )
+                resource = self._generate_heuristic(
+                    context,
+                    step,
+                    topic,
+                    difficulty,
+                    rag_context,
+                    references,
+                )
+                return self._mark_development_fallback(resource)
+        resource = self._generate_heuristic(
+            context,
+            step,
+            topic,
+            difficulty,
+            rag_context,
+            references,
+        )
+        return self._mark_development_fallback(resource)
+
+    async def _generate_with_one_format_repair(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[LLMMessage],
+        response_model: type[DraftModel],
+        finalize: Callable[[DraftModel], Resource],
+    ) -> Resource:
+        """Generate a private draft, allowing exactly one format-only repair.
+
+        Provider/network retries remain the LLM client's responsibility. Safety,
+        timeout, network, and server errors intentionally bypass this repair path.
+        """
+
+        if self._llm_client is None:
+            raise RuntimeError("LLM client is unavailable")
+
+        try:
+            draft = await self._llm_client.generate_structured(
+                system_prompt=system_prompt,
+                messages=messages,
+                response_model=response_model,
+            )
+            resource = finalize(draft)
+        except (
+            LLMResponseFormatError,
+            LLMValidationError,
+            ResourceDraftFormatError,
+        ) as error:
+            reason = getattr(error, "code", type(error).__name__)
+            logger.warning(
+                "resource_llm_format_repair agent=%s attempt=2 reason=%s",
+                self.agent_name,
+                reason,
+            )
+        else:
+            logger.info(
+                "resource_llm_success agent=%s format_repaired=false",
+                self.agent_name,
+            )
+            return resource
+
+        repair_messages = [
+            *messages,
+            LLMMessage(
+                role="user",
+                content=(
+                    "上一次响应未通过格式校验。请仅修复输出结构，"
+                    "继续严格依据同一知识库内容，不新增来源或无法核验的事实。"
+                    "只返回结构化 JSON 对象，不要输出解释或 Markdown 外层代码围栏。"
+                ),
+            ),
+        ]
+        repaired_draft = await self._llm_client.generate_structured(
+            system_prompt=system_prompt,
+            messages=repair_messages,
+            response_model=response_model,
+        )
+        resource = finalize(repaired_draft)
+        logger.info(
+            "resource_llm_success agent=%s format_repaired=true",
+            self.agent_name,
+        )
+        return resource
 
     @abstractmethod
     async def _generate_with_llm(
@@ -92,3 +231,44 @@ class BaseResourceAgent(ABC):
     @staticmethod
     def _make_resource_id() -> str:
         return str(uuid4())
+
+    @staticmethod
+    def _mark_development_fallback(resource: Resource) -> Resource:
+        marker = "development fallback：结构化 LLM 生成不可用，已使用本地规则模板。"
+        reason = f"{marker} {resource.personalization_reason}"[:2000]
+        return resource.model_copy(update={"personalization_reason": reason})
+
+    @classmethod
+    def _ensure_profile_personalization(
+        cls,
+        resource: Resource,
+        context: SharedAgentContext,
+    ) -> Resource:
+        grounded_reason = cls._personalization_reason(context)
+        existing = resource.personalization_reason.strip()
+        if grounded_reason in existing:
+            return resource
+        combined = f"{grounded_reason}；模型补充：{existing}"[:2000]
+        return resource.model_copy(update={"personalization_reason": combined})
+
+    def _emit_retrieval_event(
+        self,
+        context: SharedAgentContext,
+        *,
+        status: str,
+        progress: int,
+        message: str,
+        error: str | None = None,
+    ) -> None:
+        if context.emit_event is None:
+            return
+        context.emit_event(
+            context.task_id,
+            event_type="agent",
+            status=status,
+            progress=progress,
+            message=message,
+            agent="retriever_agent",
+            resource_type=self.resource_type,
+            error=error,
+        )

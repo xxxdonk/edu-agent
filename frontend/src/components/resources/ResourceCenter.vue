@@ -40,7 +40,12 @@
             </div>
           </el-collapse-item>
         </el-collapse>
-        <ResourcePreview :resource="selectedResource" />
+        <StatusBanner
+          v-if="selectedResource.review_status === 'rejected'"
+          status="error"
+          message="该资源未通过 Reviewer 安全审校，内容已阻止展示，请重新生成。"
+        />
+        <ResourcePreview v-else :resource="selectedResource" />
       </article>
     </div>
   </section>
