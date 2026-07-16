@@ -249,13 +249,28 @@ async def task_events(
 )
 async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> JSONResponse:
     try:
-        from app.evaluation import EvaluationAgent
+        from app.evaluation import EvaluationAgent, EvaluationService
 
-        evaluator = EvaluationAgent()
-        result, profile_updates, path_updates = await evaluator.evaluate(payload)
-        response_content = result.model_dump(mode="json")
-        response_content["profile_update_suggestions"] = profile_updates
-        response_content["path_update_suggestions"] = path_updates
+        service = EvaluationService(
+            evaluator=EvaluationAgent(),
+            profile_agent=request.app.state.profile_agent,
+            planner_agent=request.app.state.planner_agent,
+            repository=request.app.state.repository,
+        )
+        result_model = await service.process(payload)
+
+        response_content = result_model.result.model_dump(mode="json")
+
+        # 附加画像和路径更新信息
+        if result_model.updated_profile:
+            response_content["updated_profile"] = result_model.updated_profile.model_dump(
+                mode="json"
+            )
+        if result_model.updated_path:
+            response_content["updated_path"] = result_model.updated_path.model_dump(
+                mode="json"
+            )
+
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content=response_content,
