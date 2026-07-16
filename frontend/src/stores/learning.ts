@@ -26,8 +26,16 @@ interface UiChatMessage extends ChatMessage {
   pending?: boolean;
 }
 
+interface AssistantAnimationTask {
+  messageId: string;
+  fullText: string;
+  timer: ReturnType<typeof globalThis.setTimeout> | null;
+  resolve: () => void;
+}
+
 const resourceTypes: ResourceType[] = ['explanation', 'mind_map', 'quiz', 'reading', 'coding'];
 const terminalStatuses = new Set(['completed', 'partial_success', 'failed']);
+const profileFallbackNotice = '结构化 LLM 未成功完成，本轮启发式接管，精确原因见后端 profile_fallback 日志';
 
 const traceTemplate: UiAgentTrace[] = [
   {key: 'profile_agent', name: 'Profile Agent', label: '正在分析学生画像', status: 'waiting', message: '等待学习对话', progress: 0},
@@ -98,6 +106,7 @@ export const useLearningStore = defineStore('learning', () => {
   let closeStream: (() => void) | null = null;
   let pollingTimer: number | null = null;
   let finalizingTask = false;
+  let assistantAnimation: AssistantAnimationTask | null = null;
 
   const quiz = computed(() => parseQuiz(resources.value.find((item) => item.resource_type === 'quiz')));
   const developmentMode = computed(() =>
@@ -147,16 +156,68 @@ export const useLearningStore = defineStore('learning', () => {
     }
   }
 
+  function replaceMessage(messageId: string, update: Partial<UiChatMessage>) {
+    const index = messages.value.findIndex((message) => message.message_id === messageId);
+    if (index < 0) return;
+    messages.value[index] = {...messages.value[index], ...update};
+  }
+
+  function settleAssistantAnimation(task: AssistantAnimationTask, complete: boolean) {
+    if (assistantAnimation !== task) return;
+    if (task.timer !== null) globalThis.clearTimeout(task.timer);
+    task.timer = null;
+    assistantAnimation = null;
+    replaceMessage(task.messageId, {
+      content: complete
+        ? task.fullText
+        : messages.value.find((message) => message.message_id === task.messageId)?.content ?? '',
+      streaming: false,
+    });
+    task.resolve();
+  }
+
+  function stopAssistantAnimation(complete = false) {
+    if (assistantAnimation) settleAssistantAnimation(assistantAnimation, complete);
+  }
+
   async function animateAssistant(text: string) {
-    const target: UiChatMessage = {message_id: id('assistant'), role: 'assistant', content: '', streaming: true};
-    messages.value.push(target);
+    stopAssistantAnimation(true);
+    const messageId = id('assistant');
+    messages.value.push({message_id: messageId, role: 'assistant', content: '', streaming: true});
     const chunks = Array.from(text);
-    const batchSize = Math.max(1, Math.ceil(chunks.length / 35));
-    for (let index = 0; index < chunks.length; index += batchSize) {
-      target.content += chunks.slice(index, index + batchSize).join('');
-      await new Promise((resolve) => window.setTimeout(resolve, 18));
+    if (!chunks.length) {
+      replaceMessage(messageId, {streaming: false});
+      return;
     }
-    target.streaming = false;
+    const batchSize = Math.max(1, Math.ceil(chunks.length / 35));
+    await new Promise<void>((resolve) => {
+      const task: AssistantAnimationTask = {messageId, fullText: text, timer: null, resolve};
+      assistantAnimation = task;
+      let length = 0;
+      const tick = () => {
+        if (assistantAnimation !== task) return;
+        task.timer = null;
+        length = Math.min(chunks.length, length + batchSize);
+        replaceMessage(messageId, {
+          content: chunks.slice(0, length).join(''),
+          streaming: length < chunks.length,
+        });
+        if (length >= chunks.length) {
+          settleAssistantAnimation(task, true);
+          return;
+        }
+        task.timer = globalThis.setTimeout(tick, 18);
+      };
+      tick();
+    });
+  }
+
+  function warnIfProfileFallback(response: ProfileChatResponse) {
+    if (response.extraction_mode !== 'development_heuristic') return;
+    console.warn(`[profile_fallback] ${profileFallbackNotice}`, {
+      student_id: response.profile.student_id,
+      conversation_id: conversationId.value,
+    });
   }
 
   function apiMessages(): ChatMessage[] {
@@ -168,6 +229,7 @@ export const useLearningStore = defineStore('learning', () => {
   async function sendMessage(content: string) {
     const trimmed = content.trim();
     if (!trimmed || profileStatus.value === 'loading') return;
+    stopAssistantAnimation(true);
     messages.value.push({message_id: id('user'), role: 'user', content: trimmed});
     profileStatus.value = 'loading';
     notice.value = '';
@@ -183,6 +245,7 @@ export const useLearningStore = defineStore('learning', () => {
       previousProfile.value = profile.value;
       profile.value = response.profile;
       profileMeta.value = response;
+      warnIfProfileFallback(response);
       profileStatus.value = 'success';
       setTrace('profile_agent', 'completed', `画像 v${response.profile.version} 已生成`, 20);
       const answer = response.next_question || '画像已更新。我将根据这些信息为你安排下一步学习路径。';
@@ -350,6 +413,7 @@ export const useLearningStore = defineStore('learning', () => {
         });
         profile.value = profileResponse.profile;
         profileMeta.value = profileResponse;
+        warnIfProfileFallback(profileResponse);
         await generatePath(summary);
       }
     } catch (error) {
@@ -364,6 +428,7 @@ export const useLearningStore = defineStore('learning', () => {
   }
 
   function resetSession() {
+    stopAssistantAnimation();
     stopTaskMonitoring();
     studentId.value = `demo-student-${Date.now()}`;
     conversationId.value = id('conversation');
@@ -391,6 +456,6 @@ export const useLearningStore = defineStore('learning', () => {
     resources, resourceFailures, task, taskEvents, traces, evaluation, apiIssues, healthStatus,
     profileStatus, pathStatus, resourceStatus, evaluationStatus, healthMessage, notice, quiz,
     developmentMode, hasCoreContext, checkHealth, sendMessage, generatePath, startGeneration,
-    submitEvaluation, resetSession,
+    submitEvaluation, resetSession, stopAssistantAnimation,
   };
 });

@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
+    logger.warning(
+        "ENABLE_LLM=%s provider=%s model=%s api_key_present=%s",
+        runtime_settings.llm.enabled,
+        runtime_settings.llm.provider,
+        runtime_settings.llm.model,
+        bool(runtime_settings.llm.api_key.strip()),
+    )
     database = SQLiteDatabase(runtime_settings.database_path)
     repository = Repository(database)
     registry = AgentRegistry()

@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -53,6 +55,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        load_dotenv(dotenv_path=_project_root() / ".env", override=False)
         database_url = os.getenv("DATABASE_URL", "sqlite:///./data/eduagent.db")
         database_path = _sqlite_path(database_url)
 
