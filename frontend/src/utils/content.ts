@@ -19,6 +19,11 @@ export function renderMarkdown(content: string): string {
   return markdown.render(content);
 }
 
+export function formatSourceTitles(sources: Resource['source_references']): string {
+  const titles = sources.map((source) => source.title.trim()).filter(Boolean);
+  return [...new Set(titles)].join('、') || '暂无可展示来源';
+}
+
 export function parseQuiz(resource: Resource | undefined): QuizDocument | null {
   if (!resource || resource.resource_type !== 'quiz') return null;
   try {
@@ -41,6 +46,23 @@ function displayProfileValue(value: unknown): string {
 }
 
 export interface DiffRow {label: string; before: string; after: string}
+
+export type EvaluationQuestionStatus = 'correct' | 'partial' | 'incorrect' | 'unknown';
+
+export interface EvaluationQuestionFeedback {
+  line: string;
+  status: EvaluationQuestionStatus;
+}
+
+export function evaluationQuestionFeedback(feedback: string, questionId: string): EvaluationQuestionFeedback {
+  const prefix = `题目 ${questionId}：`;
+  const line = feedback.split('\n').find((item) => item.startsWith(prefix)) ?? '';
+  const detail = line.slice(prefix.length);
+  if (detail === '正确') return {line, status: 'correct'};
+  if (detail.startsWith('部分正确')) return {line, status: 'partial'};
+  if (detail.includes('不正确')) return {line, status: 'incorrect'};
+  return {line, status: 'unknown'};
+}
 
 export function profileDiff(before: StudentProfile | null, after: StudentProfile | null): DiffRow[] {
   if (!before || !after) return [];
