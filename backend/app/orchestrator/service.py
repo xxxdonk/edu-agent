@@ -136,12 +136,7 @@ class Orchestrator:
                     if generated.resource:
                         reviewed_resources.append(generated.resource)
                 else:
-                    # Reviewer 返回 (Resource, dict)，解包元组
-                    if isinstance(review_result, tuple):
-                        reviewed_resource, _review_meta = review_result
-                    else:
-                        reviewed_resource = review_result
-                    reviewed_resources.append(Resource.model_validate(reviewed_resource))
+                    reviewed_resources.append(Resource.model_validate(review_result))
             reviewer_run.status = (
                 AgentRunStatus.FAILED if reviewer_error else AgentRunStatus.COMPLETED
             )

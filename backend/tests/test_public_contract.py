@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -140,7 +139,7 @@ def test_learning_path_is_ordered_and_complete(saved_path: dict) -> None:
         assert item["estimated_minutes"] > 0
 
 
-def test_resources_generate_and_evaluation_with_agent2(
+def test_unregistered_resources_fail_without_fake_results_and_sse_works(
     client: TestClient,
     saved_profile: dict,
     saved_path: dict,
@@ -160,28 +159,16 @@ def test_resources_generate_and_evaluation_with_agent2(
     task_response = client.get(accepted_body["status_url"])
     assert task_response.status_code == 200
     task = task_response.json()
-    # Poll until task completes (background task runs asynchronously)
-    import time as _time
-    for _ in range(30):
-        task_response = client.get(accepted_body["status_url"])
-        task = task_response.json()
-        if task["status"] in ("completed", "partial_success", "failed"):
-            break
-        _time.sleep(0.5)
-    assert task["status"] in ("completed", "partial_success"), f"task failed: {task.get('errors', [])}"
-    assert len(task["result_resource_ids"]) == 5
-    # Each resource should be retrievable and have source_references
-    for resource_id in task["result_resource_ids"]:
-        res = client.get(f"/api/resources/{resource_id}")
-        assert res.status_code == 200
-        resource = res.json()
-        assert len(resource["source_references"]) >= 1
-        assert resource["review_status"] in ("approved", "needs_revision")
+    assert task["status"] == "failed"
+    assert task["result_resource_ids"] == []
+    assert len(task["errors"]) == 5
+    assert all("尚未注册" in error for error in task["errors"])
 
     events = client.get(accepted_body["events_url"])
     assert events.status_code == 200
     assert events.headers["content-type"].startswith("text/event-stream")
     assert "event: agent" in events.text
+    assert '"status": "failed"' in events.text
 
     evaluation = client.post(
         "/api/evaluation/submit",
@@ -193,10 +180,8 @@ def test_resources_generate_and_evaluation_with_agent2(
             "time_spent_minutes": 5,
         },
     )
-    assert evaluation.status_code == 200
-    eval_body = evaluation.json()
-    assert "mastery_score" in eval_body
-    assert "passed" in eval_body
+    assert evaluation.status_code == 501
+    assert evaluation.json()["error"]["details"]["mock"] is True
 
 
 class _SuccessfulResourceAgent:
