@@ -1,3 +1,5 @@
+"""EvaluationAgent backed by persisted Quiz resources and answer keys."""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +20,10 @@ class EvaluationQuestionNotFoundError(LookupError):
     """A referenced persisted quiz or question does not exist."""
 
 
+class EvaluationConfigurationError(RuntimeError):
+    """EvaluationAgent is missing a dependency required for real grading."""
+
+
 @dataclass(slots=True)
 class _QuestionMeta:
     question_id: str
@@ -33,8 +39,20 @@ class EvaluationAgent:
 
     agent_name = "evaluation_agent"
 
-    def __init__(self, repository: Repository) -> None:
+    def __init__(self, repository: Repository | None = None) -> None:
         self._repository = repository
+
+    def bind_repository(self, repository: Repository) -> None:
+        """Bind the repository that owns persisted quiz and task data."""
+        self._repository = repository
+
+    def _require_repository(self) -> Repository:
+        if self._repository is None:
+            raise EvaluationConfigurationError(
+                "EvaluationAgent repository is not configured; pass repository "
+                "to EvaluationAgent or bind it through EvaluationService"
+            )
+        return self._repository
 
     async def evaluate(
         self,
@@ -42,6 +60,7 @@ class EvaluationAgent:
         *,
         expected_topic: str,
     ) -> tuple[EvaluationResult, dict, dict]:
+        self._require_repository()
         answer_ids = [answer.question_id for answer in submission.answers]
         if len(answer_ids) != len(set(answer_ids)):
             raise EvaluationValidationError("question_id must not be submitted more than once")
@@ -124,7 +143,8 @@ class EvaluationAgent:
                 "question_id is not bound to a persisted quiz resource"
             )
 
-        resource = self._repository.get_resource(resource_id)
+        repository = self._require_repository()
+        resource = repository.get_resource(resource_id)
         if resource is None:
             raise EvaluationQuestionNotFoundError(f"quiz resource not found: {resource_id}")
         if resource.resource_type != ResourceType.QUIZ:
@@ -162,14 +182,15 @@ class EvaluationAgent:
         )
 
     def _resource_student_id(self, resource_id: str) -> str | None:
-        with self._repository.database.connect() as connection:
+        repository = self._require_repository()
+        with repository.database.connect() as connection:
             row = connection.execute(
                 "SELECT task_id FROM resources WHERE resource_id = ?",
                 (resource_id,),
             ).fetchone()
         if not row or not row["task_id"]:
             return None
-        task = self._repository.get_task(str(row["task_id"]))
+        task = repository.get_task(str(row["task_id"]))
         return task.student_id if task else None
 
     @staticmethod
