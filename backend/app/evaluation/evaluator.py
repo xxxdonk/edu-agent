@@ -1,3 +1,12 @@
+"""EvaluationAgent — LLM-driven & heuristic dual-path answer evaluator.
+
+When ``enable_llm`` is True and an ``LLMClient`` instance is available, the
+agent uses structured LLM output to judge every student answer against
+standard answers or course knowledge.  Otherwise it falls back to the
+Phase‑1 heuristic path (length‑based correctness) so that the system
+remains functional even without an LLM backend.
+"""
+
 from __future__ import annotations
 
 import json
@@ -228,6 +237,55 @@ class EvaluationAgent:
         if len(value) < 2:
             return {value} if value else set()
         return {value[index : index + 2] for index in range(len(value) - 1)}
+
+    def _build_result_from_draft(
+        self,
+        submission: EvaluationSubmission,
+        draft: EvaluationDraft,
+    ) -> tuple[EvaluationResult, dict, dict]:
+        """Convert the parsed EvaluationDraft into the canonical tuple."""
+
+        feedback_lines: list[str] = []
+        for judgment in draft.judgments:
+            symbol = {
+                "correct": "OK",
+                "partial": "PARTIAL",
+                "incorrect": "WRONG",
+            }.get(judgment.verdict, "UNKNOWN")
+
+            feedback_lines.append(
+                f"题目 {judgment.question_id}: {symbol} {judgment.reasoning}"
+            )
+
+        feedback = (
+            f"{draft.feedback}\n\n---\n逐题详情\n"
+            + "\n".join(feedback_lines)
+        )
+
+        result = EvaluationResult(
+            evaluation_id=str(uuid4()),
+            student_id=submission.student_id,
+            path_id=submission.path_id,
+            step=submission.step,
+            mastery_score=round(draft.mastery_score, 4),
+            passed=draft.passed,
+            weak_topics=list(dict.fromkeys(draft.weak_topics)),
+            feedback=feedback,
+            profile_update_required=not draft.passed,
+            path_update_required=not draft.passed,
+        )
+
+        profile_updates = self._build_profile_updates(
+            submission, result.mastery_score, result.passed, result.weak_topics
+        )
+        path_updates = self._build_path_updates(
+            submission, result.mastery_score, result.passed, result.weak_topics
+        )
+        return result, profile_updates, path_updates
+
+    # ==================================================================
+    # Profile / Path suggestion builders (shared by both paths)
+    # ==================================================================
 
     @staticmethod
     def _build_profile_updates(
