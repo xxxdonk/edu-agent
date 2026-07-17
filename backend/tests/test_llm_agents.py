@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -12,6 +13,7 @@ from app.llm import (
 from app.llm.openai_compatible import OpenAICompatibleLLMClient
 from app.planner import PlannerAgent
 from app.profile import DevelopmentProfileAgent, ProfileAgent
+from app.profile.models import ProfileExtractionDraft
 from app.schemas import ProfileChatRequest, ResourceType
 from app.schemas.profile import ChatMessage
 
@@ -97,6 +99,33 @@ def _complete_request(student_id: str = "llm-student") -> ProfileChatRequest:
             )
         ],
     )
+
+
+def _request_with_question_history(
+    text: str,
+    questions: list[str],
+    *,
+    student_id: str = "question-history-student",
+) -> ProfileChatRequest:
+    messages = [
+        ChatMessage(message_id="message-a", role="user", content=text),
+    ]
+    for index, question in enumerate(questions, start=1):
+        messages.extend(
+            [
+                ChatMessage(
+                    message_id=f"assistant-{index}",
+                    role="assistant",
+                    content=question,
+                ),
+                ChatMessage(
+                    message_id=f"user-{index}",
+                    role="user",
+                    content="我暂时还不确定。",
+                ),
+            ]
+        )
+    return ProfileChatRequest(student_id=student_id, messages=messages)
 
 
 def _development_profile(student_id: str = "planner-student"):
@@ -262,6 +291,174 @@ def test_llm_profile_missing_dimensions_produce_natural_question() -> None:
     assert response.next_question == draft["next_question"]
 
 
+def test_profile_question_does_not_target_an_already_identified_field() -> None:
+    draft = _complete_profile_draft()
+    draft["weak_topics"] = _list([], [], 0.0)
+    draft["next_question"] = "你现在主修什么专业？"
+    request = _complete_request()
+    request.messages[0].content = request.messages[0].content.replace(
+        "，数学基础比较一般",
+        "",
+    )
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([draft]), enable_llm=True).extract(
+            request,
+            None,
+        )
+    )
+
+    assert response.missing_dimensions == ["weak_topics"]
+    assert response.next_question == "目前哪些概念或题型让你最困惑？"
+
+
+def test_heuristic_question_repeats_once_then_changes_when_profile_is_unchanged() -> None:
+    text = (
+        "我是人工智能专业学生，刚开始学习机器学习，希望完成一个分类项目。"
+        "我喜欢图示，每天可以学习30分钟。"
+    )
+    agent = ProfileAgent(None, enable_llm=False)
+
+    first = asyncio.run(agent.extract(_request_with_question_history(text, []), None))
+    assert first.next_question is not None
+    second = asyncio.run(
+        agent.extract(
+            _request_with_question_history(text, [first.next_question]),
+            first.profile,
+        )
+    )
+    third = asyncio.run(
+        agent.extract(
+            _request_with_question_history(
+                text,
+                [first.next_question, second.next_question],
+            ),
+            second.profile,
+        )
+    )
+
+    assert second.next_question == first.next_question
+    assert third.next_question != first.next_question
+    assert third.next_question == "学习过程中，你现在最容易卡在哪个知识点？"
+
+
+def test_incomplete_profile_never_stops_and_no_question_is_returned_more_than_twice() -> None:
+    text = (
+        "我是人工智能专业学生，刚开始学习机器学习，希望完成一个分类项目。"
+        "我喜欢图示，每天可以学习30分钟。"
+    )
+    agent = ProfileAgent(None, enable_llm=False)
+    previous = None
+    questions: list[str] = []
+
+    for _ in range(10):
+        response = asyncio.run(
+            agent.extract(
+                _request_with_question_history(text, questions),
+                previous,
+            )
+        )
+        assert response.is_complete is False
+        assert response.next_question is not None
+        questions.append(response.next_question)
+        previous = response.profile
+
+    assert max(questions.count(question) for question in set(questions)) == 2
+    assert any("第7次补充" in question for question in questions)
+
+
+def test_llm_question_repeats_once_then_changes_when_profile_is_unchanged() -> None:
+    draft = _complete_profile_draft()
+    draft["weak_topics"] = _list([], [], 0.0)
+    draft["next_question"] = "目前哪些概念或题型让你最困惑？"
+    text = TEST_STUDENT_TEXT.replace("，数学基础比较一般", "")
+    agent = ProfileAgent(
+        FakeLLMClient([draft, draft, draft]),
+        enable_llm=True,
+    )
+
+    first = asyncio.run(
+        agent.extract(_request_with_question_history(text, []), None)
+    )
+    assert first.next_question is not None
+    second = asyncio.run(
+        agent.extract(
+            _request_with_question_history(text, [first.next_question]),
+            first.profile,
+        )
+    )
+    third = asyncio.run(
+        agent.extract(
+            _request_with_question_history(
+                text,
+                [first.next_question, second.next_question],
+            ),
+            second.profile,
+        )
+    )
+
+    assert second.next_question == first.next_question
+    assert third.next_question != first.next_question
+
+
+def test_development_profile_extracts_acceptance_case_weak_topics() -> None:
+    text = (
+        "我是人工智能专业大二学生，目前在学习机器学习，"
+        "数学基础一般，梯度下降一直没弄懂，希望完成一个分类项目。"
+        "我每天可以学习45分钟，偏好代码案例和图示。"
+    )
+    request = ProfileChatRequest(
+        student_id="acceptance-student",
+        messages=[ChatMessage(role="user", content=text)],
+    )
+
+    response = DevelopmentProfileAgent().extract(request, None)
+
+    assert response.profile.weak_topics.value == ["数学基础", "梯度下降"]
+    assert response.profile.time_budget.value is not None
+    assert response.profile.time_budget.value.minutes_per_day == 45
+    assert "weak_topics" not in response.missing_dimensions
+
+
+def test_llm_profile_keeps_explicit_weak_topics_missed_by_model() -> None:
+    text = f"{TEST_STUDENT_TEXT}\n梯度下降一直没弄懂。"
+    draft = _complete_profile_draft()
+    draft["cognitive_style"] = _scalar(None, [], 0.0)
+    draft["resource_preference"] = _list(
+        ["代码实践案例"],
+        [_evidence("inference", "代码案例", "message-a")],
+        0.8,
+    )
+    draft["weak_topics"] = _list(
+        ["梯度下降"],
+        [_evidence("conversation", "梯度下降一直没弄懂", "message-a")],
+        0.9,
+    )
+    request = ProfileChatRequest(
+        student_id="explicit-weak-topics-student",
+        messages=[
+            ChatMessage(
+                message_id="message-a",
+                role="user",
+                content=text,
+            )
+        ],
+    )
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([draft]), enable_llm=True).extract(request, None)
+    )
+
+    assert response.extraction_mode == "llm_structured"
+    assert response.profile.weak_topics.value == ["梯度下降", "数学基础"]
+    assert response.profile.cognitive_style.value == "visual"
+    assert response.profile.resource_preference.value == ["代码实践案例", "思维导图"]
+    assert all(
+        topic in response.profile.weak_topics.evidence[-1].quote
+        for topic in ("梯度下降", "数学基础")
+    )
+
+
 @pytest.mark.parametrize(
     "fake_response",
     ["{invalid-json", {"major": _scalar("人工智能")}],
@@ -276,7 +473,8 @@ def test_profile_invalid_json_or_schema_falls_back(fake_response) -> None:
     assert response.profile.major.value == "人工智能"
 
 
-def test_profile_timeout_and_missing_client_fall_back() -> None:
+def test_profile_timeout_and_missing_client_fall_back(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="app.profile.agent")
     timed_out = asyncio.run(
         ProfileAgent(
             FakeLLMClient([LLMTimeoutError("test timeout")]),
@@ -288,6 +486,19 @@ def test_profile_timeout_and_missing_client_fall_back() -> None:
     )
     assert timed_out.extraction_mode == "development_heuristic"
     assert missing_client.extraction_mode == "development_heuristic"
+    assert "profile_fallback reason=structured_extraction_failed" in caplog.text
+    assert "profile_fallback reason=llm_client_unavailable" in caplog.text
+
+
+def test_profile_disabled_reason_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="app.profile.agent")
+
+    response = asyncio.run(
+        ProfileAgent(None, enable_llm=False).extract(_complete_request(), None)
+    )
+
+    assert response.extraction_mode == "development_heuristic"
+    assert "profile_fallback reason=llm_disabled" in caplog.text
 
 
 def test_fake_llm_planner_success_is_ordered_and_respects_time_budget() -> None:
@@ -330,3 +541,114 @@ def test_openai_compatible_client_rejects_missing_configuration_without_network(
             model="test-model",
             base_url="https://example.invalid/v1",
         )
+
+
+def test_private_profile_draft_clears_evidence_for_empty_list() -> None:
+    raw = _complete_profile_draft()
+    raw["weak_topics"] = _list(
+        [],
+        [_evidence("conversation", "数学基础比较一般")],
+        0.9,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.weak_topics.value == []
+    assert draft.weak_topics.evidence == []
+    assert draft.weak_topics.confidence == 0
+
+
+def test_private_profile_draft_zeros_confidence_for_null() -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        None,
+        [_evidence("conversation", "人工智能专业")],
+        0.86,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value is None
+    assert draft.major.evidence == []
+    assert draft.major.confidence == 0
+
+
+def test_private_profile_draft_treats_empty_string_as_empty_value() -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        "  ",
+        [_evidence("conversation", "人工智能专业")],
+        0.86,
+    )
+    raw["learning_goals"] = _scalar(
+        "",
+        [_evidence("conversation", "我想理解支持向量机")],
+        0.86,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value is None
+    assert draft.learning_goals.value == []
+    assert draft.major.evidence == []
+    assert draft.learning_goals.evidence == []
+
+
+def test_private_profile_draft_preserves_nonempty_field() -> None:
+    raw = _complete_profile_draft()
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.major.value == "人工智能"
+    assert draft.major.evidence[0].quote == "人工智能专业"
+    assert draft.major.evidence[0].message_id == "message-a"
+    assert draft.major.confidence == 0.92
+
+
+def test_untraceable_field_is_discarded_without_losing_structured_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = _complete_profile_draft()
+    raw["major"] = _scalar(
+        "人工智能",
+        [_evidence("conversation", "用户从未说过的原文")],
+        0.92,
+    )
+    caplog.set_level(logging.WARNING, logger="app.profile.agent")
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([raw]), enable_llm=True).extract(
+            _complete_request(),
+            None,
+        )
+    )
+
+    assert response.extraction_mode == "llm_structured"
+    assert response.profile.major.value == "人工智能"
+    assert all(
+        evidence.quote != "用户从未说过的原文"
+        for evidence in response.profile.major.evidence
+    )
+    assert (
+        "profile_field_discarded field=major "
+        "reason=conversation_evidence_untraceable"
+    ) in caplog.text
+
+
+def test_untraceable_optional_inference_does_not_downgrade_full_profile() -> None:
+    raw = _complete_profile_draft()
+    raw["language_preference"] = _scalar(
+        "中文",
+        [_evidence("inference", "用户没有说过的语言偏好", "message-a")],
+        0.7,
+    )
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([raw]), enable_llm=True).extract(
+            _complete_request(),
+            None,
+        )
+    )
+
+    assert response.extraction_mode == "llm_structured"
+    assert response.profile.language_preference.value is None
