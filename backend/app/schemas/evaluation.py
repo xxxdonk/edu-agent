@@ -32,6 +32,3 @@ class EvaluationResult(ApiModel):
     profile_update_required: bool
     path_update_required: bool
     evaluated_at: datetime = Field(default_factory=utc_now)
-    # 任务四新增可选字段，向后兼容
-    profile_update_suggestions: dict | None = Field(default=None)
-    path_update_suggestions: dict | None = Field(default=None)

@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 from pydantic import ValidationError
 
-from app.llm import LLMClient, LLMError, LLMMessage
+from app.llm import LLMClient, LLMError, LLMMessage, LLMValidationError
 from app.llm.errors import safe_error_summary
 from app.schemas.common import Difficulty, utc_now
 from app.schemas.profile import (
@@ -186,8 +186,6 @@ class DevelopmentProfileAgent:
         patterns = (
             r"(?:不懂|不会|薄弱(?:的是)?|困难(?:的是)?|不熟悉)\s*([^，。,.；;\n]{2,30})",
             r"([^，。,.；;\n]{2,20})(?:比较薄弱|比较一般|较弱|欠缺|没掌握|总出错)",
-            r"([^，。,.；;\n]{2,20}基础)(?:比较)?一般",
-            r"([^，。,.；;\n]{2,20}?)(?:一直)?(?:没弄懂|不理解|不明白)",
         )
         for pattern in patterns:
             results.extend(match.strip() for match in re.findall(pattern, text))
@@ -443,71 +441,6 @@ class DevelopmentProfileAgent:
 class ProfileAgent:
     """Structured LLM profile extraction with an explicit heuristic fallback."""
 
-    _question_variants = {
-        "major": (
-            "你目前的专业或主要学习方向是什么？",
-            "方便说说你现在主修什么，或主要往哪个方向学习吗？",
-            "为了匹配学习内容，我还需要了解你的专业或学习方向。",
-        ),
-        "knowledge_level": (
-            "你之前接触过这门课程吗？可以举例说明目前的程度。",
-            "你对这门课目前大概掌握到什么程度？举个学过的例子也可以。",
-            "为了安排起点，你可以简单说说已有基础或相关经验吗？",
-        ),
-        "learning_goals": (
-            "你希望通过这门课程具体达成什么目标？",
-            "学完这部分内容后，你最希望自己能够完成什么？",
-            "这次学习对你来说，最重要的成果是什么？",
-        ),
-        "weak_topics": (
-            "目前哪些概念或题型让你最困惑？",
-            "学习过程中，你现在最容易卡在哪个知识点？",
-            "如果只选一个最想补强的难点，会是哪一项？",
-        ),
-        "cognitive_style": (
-            "你更喜欢图示理解、原理推导，还是边做边学？",
-            "哪种学习方式对你最有效：看图、看推导，还是动手实践？",
-            "你通常通过什么方式最容易理解一个新概念？",
-        ),
-        "time_budget": (
-            "你每周能学习几天、每天大约投入多少分钟？",
-            "方便说说你一周的学习频率和每天可用的时间吗？",
-            "为了控制学习节奏，你每周和每天大概能安排多少时间？",
-        ),
-    }
-    _question_dimension_labels = {
-        "major": "专业或主要学习方向",
-        "knowledge_level": "当前基础程度",
-        "learning_goals": "具体学习目标",
-        "weak_topics": "最需要补强的知识点",
-        "cognitive_style": "最适合你的学习方式",
-        "time_budget": "每周和每天可安排的学习时间",
-    }
-    _question_target_patterns = (
-        (
-            "weak_topics",
-            (
-                r"薄弱|困惑|不懂|不会|难点|困难|卡住|没弄懂|不理解|最难|补强",
-                r"哪些.*(?:概念|题型).*(?:困惑|不会|不熟)",
-            ),
-        ),
-        ("time_budget", (r"每天|每周|一周|分钟|小时|学习时间|投入.*时间|安排.*时间",)),
-        ("major", (r"专业|主修|学习方向|所在院系",)),
-        ("learning_goals", (r"目标|达成|学完.*(?:能够|能)|成果|希望.*完成",)),
-        (
-            "cognitive_style",
-            (r"学习方式|理解方式|图示理解|原理推导|边做边学|看图.*推导|动手实践",),
-        ),
-        (
-            "knowledge_level",
-            (r"掌握.*程度|目前.*程度|基础程度|已有基础|接触过|相关经验|学习起点",),
-        ),
-        ("course", (r"哪门课程|课程名称|具体.*课程|正在学什么",)),
-        ("learning_history", (r"学习经历|学过什么|完成过",)),
-        ("language_preference", (r"中文|英文|语言偏好",)),
-        ("resource_preference", (r"资源偏好|材料偏好|视频|代码案例|阅读材料",)),
-    )
-
     def __init__(
         self,
         llm_client: LLMClient | None = None,
@@ -524,14 +457,8 @@ class ProfileAgent:
         request: ProfileChatRequest,
         previous: StudentProfile | None,
     ) -> ProfileChatResponse:
-        if not self._enable_llm:
-            logger.warning("profile_fallback reason=llm_disabled")
-            response = self._fallback.extract(request, previous)
-            return self._stabilize_next_question(response, request, previous)
-        if self._llm_client is None:
-            logger.warning("profile_fallback reason=llm_client_unavailable")
-            response = self._fallback.extract(request, previous)
-            return self._stabilize_next_question(response, request, previous)
+        if not self._enable_llm or self._llm_client is None:
+            return self._fallback.extract(request, previous)
         try:
             draft = await self._llm_client.generate_structured(
                 system_prompt=PROFILE_SYSTEM_PROMPT,
@@ -544,109 +471,10 @@ class ProfileAgent:
                 response_model=ProfileExtractionDraft,
             )
             self._validate_evidence(draft, request)
-            response = self._build_response(draft, request, previous)
-            return self._stabilize_next_question(response, request, previous)
+            return self._build_response(draft, request, previous)
         except (LLMError, ValidationError, ValueError) as error:
-            logger.warning(
-                "profile_fallback reason=structured_extraction_failed error=%s",
-                safe_error_summary(error),
-            )
-            response = self._fallback.extract(request, previous)
-            return self._stabilize_next_question(response, request, previous)
-
-    @classmethod
-    def _stabilize_next_question(
-        cls,
-        response: ProfileChatResponse,
-        request: ProfileChatRequest,
-        previous: StudentProfile | None,
-    ) -> ProfileChatResponse:
-        missing = [
-            dimension
-            for dimension in response.missing_dimensions
-            if dimension in cls._question_variants
-        ]
-        if not missing:
-            response.next_question = None
-            return response
-
-        candidate = response.next_question or cls._question_variants[missing[0]][0]
-        target = cls._question_dimension(candidate)
-        if target not in missing:
-            target = missing[0]
-            candidate = cls._question_variants[target][0]
-
-        unchanged = previous is not None and cls._business_values(
-            response.profile
-        ) == cls._business_values(previous)
-        if not unchanged:
-            response.next_question = candidate
-            return response
-
-        asked = [
-            cls._normalize_question(message.content)
-            for message in request.messages
-            if message.role == "assistant"
-        ]
-        normalized_candidate = cls._normalize_question(candidate)
-        if asked.count(normalized_candidate) < 2:
-            response.next_question = candidate
-            return response
-
-        replacement = cls._replacement_question(target, missing, asked, normalized_candidate)
-        response.next_question = replacement
-        return response
-
-    @classmethod
-    def _replacement_question(
-        cls,
-        target: str,
-        missing: list[str],
-        asked: list[str],
-        normalized_candidate: str,
-    ) -> str:
-        ordered_dimensions = [target, *(item for item in missing if item != target)]
-        for dimension in ordered_dimensions:
-            for variant in cls._question_variants[dimension]:
-                normalized_variant = cls._normalize_question(variant)
-                if (
-                    normalized_variant != normalized_candidate
-                    and asked.count(normalized_variant) < 2
-                ):
-                    return variant
-
-        target_counts = {
-            dimension: sum(
-                cls._question_dimension(question) == dimension for question in asked
-            )
-            for dimension in ordered_dimensions
-        }
-        next_target = min(ordered_dimensions, key=target_counts.get)
-        next_attempt = target_counts[next_target] + 1
-        label = cls._question_dimension_labels[next_target]
-        return (
-            f"我还需要确认你的{label}。如果暂时不确定，可以先给出大致情况，"
-            f"或直接回复“暂不确定”（第{next_attempt}次补充）。"
-        )
-
-    @staticmethod
-    def _business_values(profile: StudentProfile) -> dict[str, object]:
-        return {
-            field_name: getattr(profile, field_name).model_dump(mode="json")["value"]
-            for field_name in DevelopmentProfileAgent._profile_field_names()
-        }
-
-    @staticmethod
-    def _normalize_question(question: str) -> str:
-        return re.sub(r"\s+", "", question).strip()
-
-    @classmethod
-    def _question_dimension(cls, question: str) -> str | None:
-        normalized = cls._normalize_question(question)
-        for dimension, patterns in cls._question_target_patterns:
-            if any(re.search(pattern, normalized) for pattern in patterns):
-                return dimension
-        return None
+            logger.warning("profile_llm_fallback error=%s", safe_error_summary(error))
+            return self._fallback.extract(request, previous)
 
     @staticmethod
     def _prompt_payload(
@@ -675,45 +503,43 @@ class ProfileAgent:
         for field_name in DevelopmentProfileAgent._profile_field_names():
             profile_field = getattr(draft, field_name)
             has_value = profile_field.value not in (None, [])
-            issue: str | None = None
             if has_value and not profile_field.evidence:
-                issue = "value_without_evidence"
-            elif not has_value and (
-                profile_field.evidence or profile_field.confidence != 0
-            ):
-                issue = "empty_value_with_evidence"
-            for evidence in profile_field.evidence if issue is None else []:
+                raise LLMValidationError(
+                    f"profile field {field_name} has a value without evidence"
+                )
+            if not has_value and (profile_field.evidence or profile_field.confidence != 0):
+                raise LLMValidationError(
+                    f"empty profile field {field_name} must have no evidence and zero confidence"
+                )
+            for evidence in profile_field.evidence:
                 if evidence.source == "conversation":
                     content = user_messages.get(evidence.message_id or "")
                     if not content or evidence.quote not in content:
-                        issue = "conversation_evidence_untraceable"
+                        raise LLMValidationError(
+                            f"conversation evidence for {field_name} is not traceable"
+                        )
                 elif evidence.source == "evaluation":
                     summary = request.evaluation_summary or ""
                     if evidence.message_id is not None or evidence.quote not in summary:
-                        issue = "evaluation_evidence_untraceable"
+                        raise LLMValidationError(
+                            f"evaluation evidence for {field_name} is not traceable"
+                        )
                 elif evidence.source == "inference":
                     if evidence.message_id is not None:
                         content = user_messages.get(evidence.message_id)
                         if not content or evidence.quote not in content:
-                            issue = "inference_evidence_untraceable"
+                            raise LLMValidationError(
+                                f"inference evidence for {field_name} is not traceable"
+                            )
                     elif not evidence.quote.startswith("推断："):
-                        issue = "inference_explanation_missing"
+                        raise LLMValidationError(
+                            f"inference evidence for {field_name} lacks an explanation"
+                        )
                 elif evidence.source == "system_default":
                     if evidence.message_id is not None or "默认" not in evidence.quote:
-                        issue = "system_default_evidence_invalid"
-                if issue is not None:
-                    break
-
-            if issue is None:
-                continue
-            logger.warning(
-                "profile_field_discarded field=%s reason=%s",
-                field_name,
-                issue,
-            )
-            profile_field.value = [] if isinstance(profile_field.value, list) else None
-            profile_field.evidence = []
-            profile_field.confidence = 0.0
+                        raise LLMValidationError(
+                            f"system default evidence for {field_name} is invalid"
+                        )
 
     def _build_response(
         self,
@@ -726,12 +552,6 @@ class ProfileAgent:
             new_field = getattr(draft, field_name).model_copy(deep=True)
             old_field = getattr(previous, field_name) if previous else None
             fields[field_name] = self._merge_field(new_field, old_field)
-
-        fields = self._supplement_explicit_fields(
-            fields,
-            request,
-            previous,
-        )
 
         if fields["course"].value is None:
             fields["course"] = ProfileField(
@@ -766,69 +586,6 @@ class ProfileAgent:
             is_complete=not missing,
             extraction_mode="llm_structured",
         )
-
-    def _supplement_explicit_fields(
-        self,
-        fields: dict[str, ProfileField],
-        request: ProfileChatRequest,
-        previous: StudentProfile | None,
-    ) -> dict[str, ProfileField]:
-        supplemental = self._fallback.extract(request, previous).profile
-        for field_name in DevelopmentProfileAgent._profile_field_names():
-            current = fields[field_name]
-            explicit = getattr(supplemental, field_name)
-            if current.value in (None, []) and explicit.value not in (None, []):
-                fields[field_name] = explicit.model_copy(deep=True)
-
-        fields["weak_topics"] = self._merge_supplemental_list(
-            fields["weak_topics"],
-            supplemental.weak_topics,
-        )
-        fields["resource_preference"] = self._merge_supplemental_list(
-            fields["resource_preference"],
-            supplemental.resource_preference,
-            category_key=self._resource_preference_category,
-        )
-        return fields
-
-    def _merge_supplemental_list(
-        self,
-        current: ProfileField,
-        supplemental: ProfileField,
-        *,
-        category_key: Callable[[str], str] | None = None,
-    ) -> ProfileField:
-        current_values = list(current.value) if isinstance(current.value, list) else []
-        supplemental_values = (
-            list(supplemental.value) if isinstance(supplemental.value, list) else []
-        )
-        key = category_key or (lambda value: value)
-        known = {key(value) for value in current_values}
-        new_values = [value for value in supplemental_values if key(value) not in known]
-        if not new_values:
-            return current
-
-        merged = current.model_copy(deep=True)
-        merged.value = [*current_values, *new_values]
-        merged.evidence = self._fallback._deduplicate_evidence(
-            [*merged.evidence, *supplemental.evidence]
-        )
-        merged.confidence = max(merged.confidence, supplemental.confidence)
-        return merged
-
-    @staticmethod
-    def _resource_preference_category(value: str) -> str:
-        categories = {
-            "code": ("代码", "编程", "实践"),
-            "visual": ("图", "可视化", "导图"),
-            "exercise": ("练习", "做题", "题目"),
-            "reading": ("阅读", "论文", "资料"),
-            "explanation": ("文档", "讲解"),
-        }
-        for category, keywords in categories.items():
-            if any(keyword in value for keyword in keywords):
-                return category
-        return value
 
     @staticmethod
     def _merge_field(

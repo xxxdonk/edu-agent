@@ -41,18 +41,6 @@ python -m venv .venv
 Copy-Item .\.env.example .\.env
 ```
 
-`.env` 只用于本机运行且已被 Git 忽略，严禁提交。复制后至少配置：
-
-```env
-ENABLE_LLM=true
-LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=<正式模型的OpenAI兼容API根地址>
-LLM_MODEL=<正式模型名称>
-LLM_API_KEY=<仅保存在本机的密钥>
-LLM_TIMEOUT_SECONDS=30
-LLM_MAX_RETRIES=1
-```
-
 关键配置：
 
 - `DATABASE_URL=sqlite:///./data/eduagent.db`：相对仓库根目录解析，与当前工作目录无关。
@@ -62,16 +50,6 @@ LLM_MAX_RETRIES=1
 - `LLM_API_KEY`：必须留在被忽略的 `.env` 或系统环境变量，严禁提交真实密钥。
 - `LLM_MODEL`、`LLM_BASE_URL`：模型名称与兼容接口基地址。
 - `LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=1`：单次超时与有限重试次数。
-
-## 手动验证真实 Profile/Planner
-
-配置项目根目录 `.env` 后，在仓库根目录执行：
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\verify_llm_profile_planner.py
-```
-
-该脚本不会被 pytest 自动执行，也不会保存完整模型响应。它只输出供应商、模型、Profile/Planner 模式、缺失维度、追问、路径主题、调用耗时和是否发生降级；未配置密钥时会在发起网络请求前友好退出。
 
 ## 启动
 

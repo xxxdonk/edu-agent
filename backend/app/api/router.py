@@ -247,48 +247,16 @@ async def task_events(
     responses={501: {"model": ErrorResponse}},
     tags=["evaluation"],
 )
-async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> JSONResponse:
-    try:
-        from app.evaluation import EvaluationAgent, EvaluationService
-
-        llm_client = request.app.state.llm_client
-        enable_llm = request.app.state.settings.llm.enabled
-        service = EvaluationService(
-            evaluator=EvaluationAgent(llm_client, enable_llm=enable_llm),
-            profile_agent=request.app.state.profile_agent,
-            planner_agent=request.app.state.planner_agent,
-            repository=request.app.state.repository,
+async def submit_evaluation(payload: EvaluationSubmission) -> JSONResponse:
+    _ = payload
+    body = ErrorResponse(
+        error=ErrorDetail(
+            code="EVALUATION_AGENT_NOT_IMPLEMENTED",
+            message="第一阶段仅固定评价接口契约，Agent 2 将在后续阶段实现真实评价。",
+            details={"mock": True},
         )
-        result_model = await service.process(payload)
-
-        response_content = result_model.result.model_dump(mode="json")
-
-        # 附加画像和路径更新信息
-        if result_model.updated_profile:
-            response_content["updated_profile"] = result_model.updated_profile.model_dump(
-                mode="json"
-            )
-        if result_model.updated_path:
-            response_content["updated_path"] = result_model.updated_path.model_dump(
-                mode="json"
-            )
-
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=response_content,
-        )
-    except Exception:
-        body = ErrorResponse(
-            error=ErrorDetail(
-                code="EVALUATION_ERROR",
-                message="Evaluation failed.",
-                details={"mock": True},
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            content=body.model_dump(),
-        )
+    )
+    return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED, content=body.model_dump())
 
 
 @router.get(
