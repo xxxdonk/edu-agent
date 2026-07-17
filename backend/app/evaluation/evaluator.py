@@ -1,11 +1,4 @@
-"""EvaluationAgent — LLM-driven & heuristic dual-path answer evaluator.
-
-When ``enable_llm`` is True and an ``LLMClient`` instance is available, the
-agent uses structured LLM output to judge every student answer against
-standard answers or course knowledge.  Otherwise it falls back to the
-Phase‑1 heuristic path (length‑based correctness) so that the system
-remains functional even without an LLM backend.
-"""
+"""EvaluationAgent backed by persisted Quiz resources and answer keys."""
 
 from __future__ import annotations
 
@@ -27,6 +20,10 @@ class EvaluationQuestionNotFoundError(LookupError):
     """A referenced persisted quiz or question does not exist."""
 
 
+class EvaluationConfigurationError(RuntimeError):
+    """EvaluationAgent is missing a dependency required for real grading."""
+
+
 @dataclass(slots=True)
 class _QuestionMeta:
     question_id: str
@@ -42,8 +39,20 @@ class EvaluationAgent:
 
     agent_name = "evaluation_agent"
 
-    def __init__(self, repository: Repository) -> None:
+    def __init__(self, repository: Repository | None = None) -> None:
         self._repository = repository
+
+    def bind_repository(self, repository: Repository) -> None:
+        """Bind the repository that owns persisted quiz and task data."""
+        self._repository = repository
+
+    def _require_repository(self) -> Repository:
+        if self._repository is None:
+            raise EvaluationConfigurationError(
+                "EvaluationAgent repository is not configured; pass repository "
+                "to EvaluationAgent or bind it through EvaluationService"
+            )
+        return self._repository
 
     async def evaluate(
         self,
@@ -51,6 +60,7 @@ class EvaluationAgent:
         *,
         expected_topic: str,
     ) -> tuple[EvaluationResult, dict, dict]:
+        self._require_repository()
         answer_ids = [answer.question_id for answer in submission.answers]
         if len(answer_ids) != len(set(answer_ids)):
             raise EvaluationValidationError("question_id must not be submitted more than once")
@@ -133,7 +143,8 @@ class EvaluationAgent:
                 "question_id is not bound to a persisted quiz resource"
             )
 
-        resource = self._repository.get_resource(resource_id)
+        repository = self._require_repository()
+        resource = repository.get_resource(resource_id)
         if resource is None:
             raise EvaluationQuestionNotFoundError(f"quiz resource not found: {resource_id}")
         if resource.resource_type != ResourceType.QUIZ:
@@ -171,14 +182,15 @@ class EvaluationAgent:
         )
 
     def _resource_student_id(self, resource_id: str) -> str | None:
-        with self._repository.database.connect() as connection:
+        repository = self._require_repository()
+        with repository.database.connect() as connection:
             row = connection.execute(
                 "SELECT task_id FROM resources WHERE resource_id = ?",
                 (resource_id,),
             ).fetchone()
         if not row or not row["task_id"]:
             return None
-        task = self._repository.get_task(str(row["task_id"]))
+        task = repository.get_task(str(row["task_id"]))
         return task.student_id if task else None
 
     @staticmethod
@@ -237,55 +249,6 @@ class EvaluationAgent:
         if len(value) < 2:
             return {value} if value else set()
         return {value[index : index + 2] for index in range(len(value) - 1)}
-
-    def _build_result_from_draft(
-        self,
-        submission: EvaluationSubmission,
-        draft: EvaluationDraft,
-    ) -> tuple[EvaluationResult, dict, dict]:
-        """Convert the parsed EvaluationDraft into the canonical tuple."""
-
-        feedback_lines: list[str] = []
-        for judgment in draft.judgments:
-            symbol = {
-                "correct": "OK",
-                "partial": "PARTIAL",
-                "incorrect": "WRONG",
-            }.get(judgment.verdict, "UNKNOWN")
-
-            feedback_lines.append(
-                f"题目 {judgment.question_id}: {symbol} {judgment.reasoning}"
-            )
-
-        feedback = (
-            f"{draft.feedback}\n\n---\n逐题详情\n"
-            + "\n".join(feedback_lines)
-        )
-
-        result = EvaluationResult(
-            evaluation_id=str(uuid4()),
-            student_id=submission.student_id,
-            path_id=submission.path_id,
-            step=submission.step,
-            mastery_score=round(draft.mastery_score, 4),
-            passed=draft.passed,
-            weak_topics=list(dict.fromkeys(draft.weak_topics)),
-            feedback=feedback,
-            profile_update_required=not draft.passed,
-            path_update_required=not draft.passed,
-        )
-
-        profile_updates = self._build_profile_updates(
-            submission, result.mastery_score, result.passed, result.weak_topics
-        )
-        path_updates = self._build_path_updates(
-            submission, result.mastery_score, result.passed, result.weak_topics
-        )
-        return result, profile_updates, path_updates
-
-    # ==================================================================
-    # Profile / Path suggestion builders (shared by both paths)
-    # ==================================================================
 
     @staticmethod
     def _build_profile_updates(
