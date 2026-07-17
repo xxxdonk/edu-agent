@@ -56,7 +56,7 @@ class CodingAgent(BaseResourceAgent):
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
 
-        var_name = topic.lower().replace(" ", "_").replace("-", "_")
+        class_name = "GradientDescentClassifier"
         content = (
             f"# {topic} — Python 代码实践（{label}）\n\n"
             f"## 目标\n"
@@ -75,9 +75,8 @@ class CodingAgent(BaseResourceAgent):
             f"y = (X[:, 0] + X[:, 1] > 0).astype(int)\n"
             f"X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)\n\n"
             f"# 2. 实现 {topic} 的核心逻辑\n"
-            f"# TODO: 在此处实现 {topic} 的算法\n"
-            f"# 提示：参考课程讲解中的公式和伪代码\n\n"
-            f"class {var_name.capitalize()}Model:\n"
+            f"# 使用批量梯度下降优化线性分类器的均方误差目标\n\n"
+            f"class {class_name}:\n"
             f'    """{topic} 的简化实现"""\n\n'
             f"    def __init__(self, learning_rate=0.01, max_iter=1000):\n"
             f"        self.lr = learning_rate\n"
@@ -99,7 +98,7 @@ class CodingAgent(BaseResourceAgent):
             f"        errors = predictions - y\n"
             f"        return X.T @ errors / len(y)\n\n"
             f"# 3. 训练与评估\n"
-            f"model = {var_name.capitalize()}Model(learning_rate=0.01, max_iter=1000)\n"
+            f"model = {class_name}(learning_rate=0.01, max_iter=1000)\n"
             f"model.fit(X_train, y_train)\n"
             f"train_acc = (model.predict(X_train) == y_train).mean()\n"
             f"test_acc = (model.predict(X_test) == y_test).mean()\n"

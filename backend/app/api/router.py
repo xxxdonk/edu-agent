@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Annotated
 
@@ -9,6 +10,11 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field
 
+from app.evaluation.evaluator import (
+    EvaluationAgent,
+    EvaluationQuestionNotFoundError,
+    EvaluationValidationError,
+)
 from app.orchestrator import SharedAgentContext
 from app.schemas import (
     ErrorResponse,
@@ -25,9 +31,11 @@ from app.schemas import (
     TaskState,
     TaskStatus,
 )
-from app.schemas.common import ApiModel, ErrorDetail
+from app.schemas.common import ApiModel
+from app.schemas.profile import ChatMessage
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 class HealthResponse(ApiModel):
@@ -47,6 +55,23 @@ def _not_found(entity: str, identifier: str) -> HTTPException:
             "details": {"id": identifier},
         },
     )
+
+
+def _planner_target_topics(profile: StudentProfile) -> list[str]:
+    """Turn evidenced profile priorities into an explicit Planner input."""
+
+    weak_topics = [str(topic).strip() for topic in profile.weak_topics.value or []]
+    goals = [str(goal).strip() for goal in profile.learning_goals.value or []]
+    searchable = " ".join([*weak_topics, *goals])
+    targets: list[str] = []
+    if any(token in searchable for token in ("数学", "线性代数", "微积分", "导数")):
+        targets.append("数学基础（线性代数与微积分）")
+    if "梯度下降" in searchable:
+        targets.append("梯度下降")
+    targets.extend(weak_topics)
+    if "分类" in searchable and "项目" in searchable:
+        targets.append("分类项目实践")
+    return list(dict.fromkeys(target for target in targets if target))
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -117,6 +142,7 @@ async def generate_path(payload: PathGenerateRequest, request: Request) -> PathG
         previous_path=previous_path,
         previous_path_id=payload.previous_path_id,
         evaluation_summary=payload.evaluation_summary,
+        target_topics=_planner_target_topics(profile),
     )
     repository.save_path(path)
     return PathGenerateResponse(path=path)
@@ -149,6 +175,18 @@ async def generate_resources(
                 "details": {},
             },
         )
+    if path.profile_version != profile.version:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PROFILE_PATH_VERSION_MISMATCH",
+                "message": "path was generated from an older student profile",
+                "details": {
+                    "profile_version": profile.version,
+                    "path_profile_version": path.profile_version,
+                },
+            },
+        )
     if payload.step not in {item.step for item in path.steps}:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -165,6 +203,7 @@ async def generate_resources(
         request=payload,
         profile=profile,
         path=path,
+        emit_event=repository.append_event,
     )
     background_tasks.add_task(request.app.state.orchestrator.run_resource_task, context)
     return TaskAcceptedResponse(
@@ -248,47 +287,117 @@ async def task_events(
     tags=["evaluation"],
 )
 async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> JSONResponse:
+    repository = request.app.state.repository
+    path = repository.get_path(payload.path_id)
+    if path is None:
+        raise _not_found("path", payload.path_id)
+    if path.student_id != payload.student_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PATH_OWNER_MISMATCH",
+                "message": "path does not belong to student_id",
+                "details": {},
+            },
+        )
+    path_step = next((item for item in path.steps if item.step == payload.step), None)
+    if path_step is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PATH_STEP_NOT_FOUND",
+                "message": f"step {payload.step} does not exist in path",
+                "details": {},
+            },
+        )
+    previous_profile = repository.get_latest_profile(payload.student_id)
+    if previous_profile is None:
+        raise _not_found("profile", payload.student_id)
+
+    evaluator = EvaluationAgent(repository)
     try:
-        from app.evaluation import EvaluationAgent, EvaluationService
-
-        llm_client = request.app.state.llm_client
-        enable_llm = request.app.state.settings.llm.enabled
-        service = EvaluationService(
-            evaluator=EvaluationAgent(llm_client, enable_llm=enable_llm),
-            profile_agent=request.app.state.profile_agent,
-            planner_agent=request.app.state.planner_agent,
-            repository=request.app.state.repository,
+        result, profile_updates, path_updates = await evaluator.evaluate(
+            payload,
+            expected_topic=path_step.topic,
         )
-        result_model = await service.process(payload)
+    except EvaluationQuestionNotFoundError as exc:
+        raise _not_found("question", str(exc)) from exc
+    except EvaluationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "EVALUATION_SUBMISSION_INVALID",
+                "message": str(exc),
+                "details": {},
+            },
+        ) from exc
 
-        response_content = result_model.result.model_dump(mode="json")
+    if result.profile_update_required or result.path_update_required:
+        weak_topics = "、".join(result.weak_topics) or path_step.topic
+        evaluation_summary = (
+            f"学习评价证据（来源：evaluation，评价编号：{result.evaluation_id}）："
+            f"掌握度 {result.mastery_score:.0%}；薄弱点：{weak_topics}；"
+            f"结论：{'通过但仍需巩固' if result.passed else '未通过，需要优先复习'}。"
+        )
+        profile_request = ProfileChatRequest(
+            student_id=payload.student_id,
+            conversation_id=f"evaluation-{result.evaluation_id}",
+            messages=[
+                ChatMessage(
+                    message_id=f"evaluation-system-{result.evaluation_id}",
+                    role="assistant",
+                    content="系统正在依据独立的学习评价更新画像；本消息不是学生原话。",
+                )
+            ],
+            evaluation_summary=evaluation_summary,
+        )
+        profile_response = await request.app.state.profile_agent.extract(
+            profile_request,
+            previous_profile,
+        )
+        updated_profile = profile_response.profile
+        repository.save_profile(updated_profile)
+        profile_updates.update(
+            {
+                "updated_profile_version": updated_profile.version,
+                "extraction_mode": profile_response.extraction_mode,
+                "evidence_source": "evaluation",
+            }
+        )
 
-        # 附加画像和路径更新信息
-        if result_model.updated_profile:
-            response_content["updated_profile"] = result_model.updated_profile.model_dump(
-                mode="json"
+        updated_path = await request.app.state.planner_agent.generate(
+            updated_profile,
+            previous_path=path,
+            previous_path_id=path.path_id,
+            evaluation_summary=evaluation_summary,
+            target_topics=_planner_target_topics(updated_profile),
+        )
+        if not updated_path.adjustment_reason:
+            updated_path = updated_path.model_copy(
+                update={"adjustment_reason": f"根据评价结果优先复习：{weak_topics}"}
             )
-        if result_model.updated_path:
-            response_content["updated_path"] = result_model.updated_path.model_dump(
-                mode="json"
-            )
+        repository.save_path(updated_path)
+        path_updates.update(
+            {
+                "new_path_id": updated_path.path_id,
+                "updated_path": updated_path.model_dump(mode="json"),
+                "generation_mode": updated_path.generation_mode,
+            }
+        )
+        logger.info(
+            "evaluation_closed_loop student_id=%s profile_version=%s path_replanned=%s",
+            payload.student_id,
+            updated_profile.version,
+            True,
+        )
 
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=response_content,
-        )
-    except Exception:
-        body = ErrorResponse(
-            error=ErrorDetail(
-                code="EVALUATION_ERROR",
-                message="Evaluation failed.",
-                details={"mock": True},
-            )
-        )
-        return JSONResponse(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            content=body.model_dump(),
-        )
+    response_content = result.model_dump(mode="json")
+    response_content["profile_update_suggestions"] = profile_updates
+    response_content["path_update_suggestions"] = path_updates
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=response_content,
+    )
 
 
 @router.get(

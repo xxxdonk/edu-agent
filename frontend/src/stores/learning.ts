@@ -104,8 +104,9 @@ export const useLearningStore = defineStore('learning', () => {
   const notice = ref('');
 
   let closeStream: (() => void) | null = null;
-  let pollingTimer: number | null = null;
+  let pollingTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   let finalizingTask = false;
+  let resourceGenerationEpoch = 0;
   let assistantAnimation: AssistantAnimationTask | null = null;
 
   const quiz = computed(() => parseQuiz(resources.value.find((item) => item.resource_type === 'quiz')));
@@ -113,6 +114,17 @@ export const useLearningStore = defineStore('learning', () => {
     profileMeta.value?.extraction_mode.startsWith('development_') || path.value?.generation_mode.startsWith('development_'),
   );
   const hasCoreContext = computed(() => Boolean(profile.value && path.value));
+
+  function isLearningPath(value: unknown, expectedPathId?: string): value is LearningPath {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as Partial<LearningPath>;
+    return typeof candidate.path_id === 'string'
+      && (!expectedPathId || candidate.path_id === expectedPathId)
+      && candidate.student_id === studentId.value
+      && typeof candidate.profile_version === 'number'
+      && Array.isArray(candidate.steps)
+      && candidate.steps.length > 0;
+  }
 
   function setTrace(key: string, status: UiAgentStatus, message: string, progress?: number, error?: string) {
     const trace = traces.value.find((item) => item.key === key);
@@ -305,19 +317,41 @@ export const useLearningStore = defineStore('learning', () => {
   function stopTaskMonitoring() {
     closeStream?.();
     closeStream = null;
-    if (pollingTimer !== null) window.clearInterval(pollingTimer);
+    if (pollingTimer !== null) globalThis.clearInterval(pollingTimer);
     pollingTimer = null;
   }
 
-  async function finalizeTask(taskId: string) {
-    if (finalizingTask) return;
+  function clearStepArtifacts() {
+    resourceGenerationEpoch += 1;
+    stopTaskMonitoring();
+    resources.value = [];
+    resourceFailures.value = [];
+    task.value = null;
+    taskEvents.value = [];
+    evaluation.value = null;
+    resourceStatus.value = 'idle';
+    evaluationStatus.value = 'idle';
+    resetResourceTraces();
+  }
+
+  function selectStep(step: number) {
+    if (step === selectedStep.value) return;
+    if (path.value && !path.value.steps.some((item) => item.step === step)) return;
+    selectedStep.value = step;
+    clearStepArtifacts();
+  }
+
+  async function finalizeTask(taskId: string, epoch = resourceGenerationEpoch) {
+    if (epoch !== resourceGenerationEpoch || finalizingTask) return;
     finalizingTask = true;
     try {
       const result = await api.task(taskId);
+      if (epoch !== resourceGenerationEpoch) return;
       task.value = result;
       if (!terminalStatuses.has(result.status)) return;
       stopTaskMonitoring();
       const settled = await Promise.allSettled(result.result_resource_ids.map((resourceId) => api.resource(resourceId)));
+      if (epoch !== resourceGenerationEpoch) return;
       resources.value = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
       resourceFailures.value = [
         ...result.errors,
@@ -328,6 +362,7 @@ export const useLearningStore = defineStore('learning', () => {
       else resourceStatus.value = 'success';
       setTrace('system', result.status === 'failed' ? 'failed' : 'completed', result.current_stage, result.progress, result.errors.join('；'));
     } catch (error) {
+      if (epoch !== resourceGenerationEpoch) return;
       resourceStatus.value = 'error';
       notice.value = toUserMessage(error);
       recordIssue(API_ENDPOINTS.task(taskId), {task_id: taskId}, 'TaskState 终态及资源 ID', error, [
@@ -340,10 +375,14 @@ export const useLearningStore = defineStore('learning', () => {
 
   async function startGeneration(regenerate = false) {
     if (!profile.value || !path.value || resourceStatus.value === 'loading') return;
+    const epoch = ++resourceGenerationEpoch;
     stopTaskMonitoring();
     resetResourceTraces();
     resources.value = [];
     resourceFailures.value = [];
+    evaluation.value = null;
+    evaluationStatus.value = 'idle';
+    task.value = null;
     taskEvents.value = [];
     resourceStatus.value = 'loading';
     notice.value = '';
@@ -357,26 +396,34 @@ export const useLearningStore = defineStore('learning', () => {
     };
     try {
       const accepted = await api.generateResources(payload);
+      if (epoch !== resourceGenerationEpoch) return;
       task.value = {
         task_id: accepted.task_id, task_type: 'resource_generation', student_id: studentId.value,
         status: accepted.status, progress: 0, current_stage: '任务已创建', requested_resource_types: resourceTypes,
         result_resource_ids: [], agent_runs: [], errors: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       };
       closeStream = connectTaskEvents(accepted.events_url, {
-        onEvent: applyTaskEvent,
-        onTerminal: () => void finalizeTask(accepted.task_id),
-        onError: (message) => { notice.value = message; },
+        onEvent: (event) => {
+          if (epoch === resourceGenerationEpoch) applyTaskEvent(event);
+        },
+        onTerminal: () => void finalizeTask(accepted.task_id, epoch),
+        onError: (message) => {
+          if (epoch === resourceGenerationEpoch) notice.value = message;
+        },
       });
-      pollingTimer = window.setInterval(async () => {
+      pollingTimer = globalThis.setInterval(async () => {
+        if (epoch !== resourceGenerationEpoch) return;
         try {
           const state = await api.task(accepted.task_id);
+          if (epoch !== resourceGenerationEpoch) return;
           task.value = state;
-          if (terminalStatuses.has(state.status)) await finalizeTask(accepted.task_id);
+          if (terminalStatuses.has(state.status)) await finalizeTask(accepted.task_id, epoch);
         } catch {
           // SSE remains the primary channel; polling errors are handled by final task retrieval.
         }
       }, 2500);
     } catch (error) {
+      if (epoch !== resourceGenerationEpoch) return;
       resourceStatus.value = 'error';
       notice.value = toUserMessage(error);
       setTrace('retriever', 'failed', notice.value, 30, notice.value);
@@ -401,10 +448,45 @@ export const useLearningStore = defineStore('learning', () => {
       const result = await api.evaluate(payload);
       evaluation.value = result;
       evaluationStatus.value = 'success';
-      if (result.profile_update_required || result.path_update_required) {
-        const summary = `${result.feedback}\n薄弱知识点：${result.weak_topics.join('、') || '无'}`;
+
+      const summary = `${result.feedback}\n薄弱知识点：${result.weak_topics.join('、') || '无'}`;
+      const profileSuggestions = result.profile_update_suggestions;
+      const pathSuggestions = result.path_update_suggestions;
+      let profileUpdated = false;
+      let pathUpdated = false;
+
+      if (typeof profileSuggestions?.updated_profile_version === 'number') {
         previousProfile.value = profile.value;
+        profile.value = await api.profile(studentId.value);
+        profileUpdated = true;
+        const extractionMode = profileSuggestions.extraction_mode;
+        if (extractionMode === 'llm_structured' || extractionMode === 'development_heuristic') {
+          profileMeta.value = {
+            ...(profileMeta.value ?? {missing_dimensions: [], next_question: null, is_complete: true}),
+            extraction_mode: extractionMode,
+          };
+          if (extractionMode === 'development_heuristic') {
+            console.warn(`[profile_fallback] ${profileFallbackNotice}`, {
+              student_id: studentId.value,
+              conversation_id: conversationId.value,
+            });
+          }
+        }
+      }
+
+      if (isLearningPath(pathSuggestions?.updated_path, pathSuggestions?.new_path_id)) {
         previousPath.value = path.value;
+        path.value = pathSuggestions.updated_path;
+        selectedStep.value = path.value.steps[0]?.step ?? selectedStep.value;
+        pathStatus.value = 'success';
+        setTrace('planner_agent', 'completed', `已采用评价后的新路径，共 ${path.value.steps.length} 个步骤`, 30);
+        pathUpdated = true;
+      }
+
+      const needsLegacyProfileUpdate = result.profile_update_required && !profileUpdated;
+      const needsLegacyPathUpdate = result.path_update_required && !pathUpdated;
+      if (needsLegacyProfileUpdate) {
+        previousProfile.value = profile.value;
         const profileResponse = await api.chat({
           student_id: studentId.value,
           conversation_id: conversationId.value,
@@ -414,6 +496,8 @@ export const useLearningStore = defineStore('learning', () => {
         profile.value = profileResponse.profile;
         profileMeta.value = profileResponse;
         warnIfProfileFallback(profileResponse);
+      }
+      if (needsLegacyPathUpdate) {
         await generatePath(summary);
       }
     } catch (error) {
@@ -429,6 +513,7 @@ export const useLearningStore = defineStore('learning', () => {
 
   function resetSession() {
     stopAssistantAnimation();
+    resourceGenerationEpoch += 1;
     stopTaskMonitoring();
     studentId.value = `demo-student-${Date.now()}`;
     conversationId.value = id('conversation');
@@ -456,6 +541,6 @@ export const useLearningStore = defineStore('learning', () => {
     resources, resourceFailures, task, taskEvents, traces, evaluation, apiIssues, healthStatus,
     profileStatus, pathStatus, resourceStatus, evaluationStatus, healthMessage, notice, quiz,
     developmentMode, hasCoreContext, checkHealth, sendMessage, generatePath, startGeneration,
-    submitEvaluation, resetSession, stopAssistantAnimation,
+    submitEvaluation, resetSession, stopAssistantAnimation, selectStep,
   };
 });

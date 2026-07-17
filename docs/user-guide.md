@@ -1,90 +1,233 @@
 # EduAgent 用户指南
 
-## 1. 运行环境
+## 1. 运行要求
 
+- Windows 10 或 Windows 11
+- PowerShell 5.1 或 PowerShell 7
 - Python 3.11 及以上
 - Node.js 20 及以上
 - npm 10 及以上
-- 推荐浏览器：Microsoft Edge 或 Chrome 最新稳定版
+- Microsoft Edge 或 Chrome 最新稳定版
 
-## 2. 启动后端
+## 2. 首次安装
 
-在仓库根目录执行：
+在仓库根目录打开 PowerShell：
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r .\backend\requirements-dev.txt
+Set-Location .\frontend
+npm ci
+Set-Location ..
 Copy-Item .\.env.example .\.env
-Set-Location .\backend
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --env-file ..\.env
 ```
 
-访问 `http://127.0.0.1:8000/api/health`，确认 `status` 和 `database` 均为 `ok`。
+若要使用真实 DeepSeek，在根目录 `.env` 中配置模型开关、OpenAI 兼容地址、模型名称和本机 API Key。不要把 `.env` 复制到提交包、聊天记录或截图中。
 
-真实模型演示需在仓库根目录 `.env` 中配置 `ENABLE_LLM=true`、模型地址、模型名称和密钥。不要将 `.env` 提交到 Git。
+## 3. 启动
 
-## 3. 启动前端
+### 一键启动
 
-新开一个 PowerShell 窗口，在仓库根目录执行：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_demo.ps1
+```
+
+脚本检查依赖和端口，启动前端与后端，并在两个服务可访问后显示地址。保持窗口打开，按 `Ctrl+C` 停止服务。
+
+### 手动启动
+
+后端 PowerShell：
+
+```powershell
+Set-Location .\backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+前端 PowerShell：
 
 ```powershell
 Set-Location .\frontend
-Copy-Item .\.env.example .\.env
-npm install
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-打开 `http://127.0.0.1:5173/`。页面右上角应显示后端版本、数据库状态和运行环境。
+访问：
 
-## 4. 核心使用流程
+- 前端：`http://127.0.0.1:5173/`
+- 后端健康检查：`http://127.0.0.1:8000/api/health`
 
-### 4.1 对话生成学习画像
+后端从项目根目录读取 `.env`。安全启动日志只显示模型开关、provider、model 和是否存在密钥。
 
-在“学习画像工作区”用自然语言描述专业、课程基础、学习目标、薄弱点、偏好和可用时间。系统会逐字展示回复，并生成 10 个画像维度。
+## 4. 演示前预热
 
-点击任一画像维度的“查看字段证据”，可查看证据来源和原始话语。若信息不足，页面会展示缺失维度，EduAgent 会继续自然语言追问。
+在启动完整服务前运行：
 
-### 4.2 查看个性化学习路径
+```powershell
+.\.venv\Scripts\python.exe .\scripts\verify_llm_profile_planner.py
+```
 
-画像更新后，系统自动调用 Planner Agent。进入“个性化学习路径工作区”，查看每一步的主题、目标、安排原因、推荐资源、前置知识、预计时间和完成标准。
+该脚本验证 DeepSeek 连接及 Profile、Planner 的结构化输出，可以减少首次演示的连接冷启动影响。它不保存完整模型响应，也不输出密钥。
 
-点击一个步骤将其设为当前资源生成目标。评价触发路径调整后，评价区会展示更新前后对比。
+服务启动后可运行：
 
-### 4.3 生成五类学习资源
+```powershell
+.\.venv\Scripts\python.exe .\scripts\verify_end_to_end.py --verify-cache
+.\.venv\Scripts\python.exe .\scripts\verify_resource_stability.py --runs 3
+```
 
-进入“资源中心与学习评价”，点击“生成五类资源”。页面通过 SSE 展示 Profile、Planner、Retriever、五个资源 Agent、Reviewer 和 Orchestrator 的状态。
+三个固定案例使用：
 
-任务完成后可依次查看：
+```powershell
+.\.venv\Scripts\python.exe .\scripts\verify_demo_cases.py
+```
+
+案例脚本默认最多透明尝试 4 次，每次使用新的学生 ID，并在安全摘要中报告尝试次数和此前失败码。该策略只属于手动验证脚本，不改变产品 Agent 的一次格式修复上限。
+
+## 5. 核心使用流程
+
+### 5.1 自然语言生成画像
+
+在“学习画像”工作区用一段自然语言说明：
+
+- 专业和当前课程
+- 已有基础
+- 学习目标
+- 薄弱知识点
+- 资源和表达偏好
+- 每天可用时间
+
+系统把截至本轮的完整对话历史提交给 Profile Agent。信息充分时生成 10 个画像维度；信息不足时只追问一个关键问题。同一画像没有变化时，相同追问不会无限重复。
+
+点击画像字段可查看证据和置信度。模式标签含义：
+
+- “结构化大模型结果”：`llm_structured`
+- “开发适配器结果”：`development_heuristic`
+
+助手消息不依赖输入框刷新；用户停止输入后回复仍会完整显示。
+
+### 5.2 查看学习路径
+
+画像完成后，系统调用 Planner。路径按步骤显示：
+
+- 主题和学习目标
+- 安排原因
+- 推荐资源
+- 完成标准
+- 预计时间
+- 前置知识
+
+选择一个步骤作为资源目标。真实模型路径显示 `llm_structured`；显式规则降级显示 `development_rule_based`。
+
+### 5.3 生成五类资源
+
+进入“资源中心与学习评价”，点击生成全部资源。Orchestrator 并行执行：
+
+1. 课程 RAG 检索；
+2. Explanation；
+3. MindMap；
+4. Quiz；
+5. Reading；
+6. Coding；
+7. Reviewer 逐项审校。
+
+页面通过 SSE 自动显示检索、生成、审校和任务终态。网络短暂中断时会从最后 sequence 恢复；心跳不会显示为业务进度。
+
+任务状态：
+
+- `completed`：所有请求资源成功且通过审校。
+- `partial_success`：至少一项资源成功，其他项失败或需要修改。
+- `failed`：没有可发布资源。
+
+单项失败不会隐藏其他成功资源。
+
+### 5.4 查看资源
+
+资源卡片显示：
+
+- 标题
+- 类型
+- 目标知识点
+- 难度
+- 个性化原因
+- 课程来源
+- Reviewer 状态
+
+支持的内容：
 
 - Markdown 课程讲解
 - Mermaid 思维导图
-- 分层练习题
+- 三层 Quiz 及解析
 - 拓展阅读
 - Python 代码实践
 
-每项资源均显示目标知识点、难度、个性化原因、知识库来源、审校状态和创建时间。单个资源失败时，其他成功资源仍会保留。
+`rejected` 资源不会作为可用学习内容显示。`needs_revision` 会明确标记，并使任务成为部分成功。
 
-### 4.4 提交练习并动态调整
+### 5.5 提交 Quiz 与动态调整
 
-完成分层练习后提交答案。页面展示掌握度总分、逐题结果、参考答案、解析、薄弱知识点和学习建议。
+Quiz 固定包含基础单选、进阶简答和挑战综合三题。提交后，Evaluation 根据数据库中的真实答案计算：
 
-当评价结果要求更新时，前端会将评价摘要再次提交给 Profile Agent，并带旧路径 ID 调用 Planner Agent，随后展示画像和路径更新前后差异。
+- 掌握度
+- 是否通过
+- 薄弱知识点
+- 反馈与学习建议
+- 每题结果、参考答案与解析；正确题显示为绿色，错误题显示为红色
 
-## 5. 状态说明
+需要调整时，后端在同一次 Evaluation 请求中完成画像版本递增和路径重规划。前端直接采用已持久化的新画像和新路径，不重复调用 Profile 或 Planner。评价证据显示为 `evaluation`，不是学生原话；新路径包含 `adjustment_reason`。
 
-- “结构化大模型结果”：本次画像或路径来自真实结构化 LLM 调用。
-- “开发适配器结果”：后端未配置模型或模型调用失败，结果来自公开标记的开发降级逻辑。
-- “部分成功”：至少一项资源失败，成功资源仍可使用。
-- “需修改”：Reviewer 发现来源、难度、个性化或内容完整性问题。
+## 6. fallback 行为
 
-系统不使用固定结果冒充真实接口。接口异常会以中文提示，并在页面底部“后端接口问题记录”中保存请求、预期响应、实际响应和复现步骤。
+真实模型不可用、超时、拒绝或输出校验失败时，系统保留可演示的明确降级：
 
-## 6. 常见问题
+- Profile：`development_heuristic`
+- Planner：`development_rule_based`
+- 资源：`personalization_reason` 中显示 `development fallback`
 
-前端显示“无法连接学习服务”：确认后端运行于 `127.0.0.1:8000`，并检查 `frontend/.env` 的 `VITE_API_BASE_URL`。
+Quiz、MindMap 和 Reading 首次只发生安全格式错误时，会向模型请求一次格式修复。Profile 与 Planner 在结构或私有草稿校验失败时也最多请求一次完整 JSON 修复，并继续执行原有证据和路径约束。第二次失败后才进入对应的显式 fallback；网络、超时和安全拒绝不会触发格式修复。安全、事实、来源和 Reviewer 标准不会因此放宽，fallback 资源不会进入缓存。
 
-思维导图无法显示：页面会保留原始 Mermaid 文本。检查资源的 `content_format` 是否为 `mermaid`，以及内容是否符合 Mermaid 语法。
+## 7. 缓存行为
 
-资源生成后没有内容：查看 Agent 轨迹、任务终态和接口问题记录；`partial_success` 不应隐藏已有成功资源。
+相同学生、画像版本、路径步骤、资源类型、模型版本和知识库版本可复用已审校资源。缓存默认在单个后端进程中保留 30 分钟，最多 128 项。
 
-评价显示开发接口提示：当前后端评价 Agent 尚未成功返回正式 `EvaluationResult`，前端不会加载伪造评价。
+缓存命中仍会：
+
+- 创建新的资源 ID；
+- 为 Quiz 重写题目 ID；
+- 再次执行 Reviewer；
+- 在 SSE 检索消息中显示 `cache_hit=true`。
+
+画像、路径、模型、课程资料或生成器版本变化后，旧缓存不会命中。需要强制重新生成时使用公共请求已有的 `regenerate=true`。
+
+## 8. 三个固定演示案例
+
+案例定义位于 `scripts/demo_cases.json`：
+
+- A：初学视觉型，突出数学、梯度下降、图示和类比。
+- B：考试型，突出模型评估、过拟合、正则化和分层练习。
+- C：项目实践型，突出逻辑回归、模型选择、调参与代码实验。
+
+详细预期和讲解方式见 `docs/demo-script.md`。
+
+## 9. 常见问题
+
+### 页面显示无法连接后端
+
+确认后端在 `127.0.0.1:8000` 运行，并访问 `/api/health`。检查端口是否被其他程序占用。
+
+### 页面一直显示加载中
+
+查询任务状态。正常任务一定收敛到 `completed`、`partial_success` 或 `failed`。SSE 中断时前端会重连并使用轮询兜底。
+
+### 思维导图无法显示
+
+页面会保留原始 Mermaid 文本和错误提示。其他资源不受影响。重新生成前先查看 Reviewer 状态和后端安全日志。
+
+### 资源显示 development fallback
+
+这表示结构化资源生成未成功，系统使用了有真实课程来源的本地规则内容。该资源仍经过 Reviewer，但不能被描述为 DeepSeek 生成结果。
+
+### 第二次生成明显更快
+
+检查 SSE 是否出现 `cache_hit=true`。只有相同缓存键才能复用；这代表使用已审校资源快照，不代表模型调用速度提升。
+
+### Evaluation 提交失败
+
+必须提交当前学生、当前路径步骤下持久化 Quiz 的题目 ID。旧资源、其他学生或手写题目 ID 会被拒绝。

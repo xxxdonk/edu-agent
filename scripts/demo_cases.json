@@ -1,0 +1,76 @@
+{
+  "cases": [
+    {
+      "id": "visual_beginner",
+      "name": "A. 初学视觉型学生",
+      "input": "我是计算机科学专业大一学生，刚开始学习机器学习，线性代数基础和梯度下降都很薄弱，希望看懂基础分类模型。每天可以学习30分钟，偏好图示、思维导图和生活类比。",
+      "expected_profile": {
+        "major_any": ["计算机"],
+        "course_any": ["机器学习"],
+        "knowledge_level": ["beginner"],
+        "time_budget_minutes": 30,
+        "goal_any": ["分类"],
+        "weak_topic_groups": [["线性代数", "数学基础"], ["梯度下降"]],
+        "preference_any": ["思维导图", "图示", "visual"]
+      },
+      "expected_path": {
+        "priority_any": ["线性代数", "数学", "梯度下降"],
+        "eventual_any": ["分类"]
+      },
+      "expected_resource_difference": "讲解和思维导图应先提供直观图示、概念关系与生活类比，再进入公式和分类模型。",
+      "quiz_submission": {
+        "strategy": "all_wrong",
+        "time_spent_minutes": 8
+      },
+      "expected_after_evaluation": "画像新增 evaluation 证据并继续保留数学基础、梯度下降为薄弱点；新路径优先复习基础概念。"
+    },
+    {
+      "id": "exam_oriented",
+      "name": "B. 考试型学生",
+      "input": "我是数据科学专业大三学生，正在复习机器学习期末考试，已经学过回归和分类，但模型评估、过拟合和正则化容易混淆。目标是考试达到85分，每天可以学习60分钟，偏好分层练习、公式总结和错题解析。",
+      "expected_profile": {
+        "major_any": ["数据科学"],
+        "course_any": ["机器学习"],
+        "knowledge_level": ["intermediate", "advanced"],
+        "time_budget_minutes": 60,
+        "goal_any": ["考试", "85"],
+        "weak_topic_groups": [["模型评估"], ["过拟合"], ["正则化"]],
+        "preference_any": ["练习", "题目", "practice"]
+      },
+      "expected_path": {
+        "priority_any": ["模型评估", "过拟合", "正则化"],
+        "eventual_any": ["考试", "练习", "综合"]
+      },
+      "expected_resource_difference": "Quiz 和讲解应突出模型评估、过拟合、正则化的辨析、公式与分层练习。",
+      "quiz_submission": {
+        "strategy": "alternating",
+        "time_spent_minutes": 12
+      },
+      "expected_after_evaluation": "错题对应知识点成为评价证据，新路径增加针对性复习和练习完成标准。"
+    },
+    {
+      "id": "project_practice",
+      "name": "C. 项目实践型学生",
+      "input": "我是人工智能专业大二学生，目前课程是机器学习，已有Python和机器学习基础，正在做一个客户流失分类项目，对逻辑回归、模型选择和参数调优不熟。希望完成可运行项目并比较模型效果，每天可以学习90分钟，偏好代码案例、实验和项目任务。",
+      "expected_profile": {
+        "major_any": ["人工智能"],
+        "course_any": ["机器学习"],
+        "knowledge_level": ["intermediate", "advanced"],
+        "time_budget_minutes": 90,
+        "goal_any": ["项目", "分类"],
+        "weak_topic_groups": [["逻辑回归"], ["模型选择"], ["调优", "参数"]],
+        "preference_any": ["代码", "实践", "practice"]
+      },
+      "expected_path": {
+        "priority_any": ["逻辑回归", "模型选择", "调优"],
+        "eventual_any": ["项目", "分类", "客户流失"]
+      },
+      "expected_resource_difference": "代码资源应围绕可运行分类实验、模型比较与调参，讲解和Quiz服务于项目决策。",
+      "quiz_submission": {
+        "strategy": "first_correct",
+        "time_spent_minutes": 15
+      },
+      "expected_after_evaluation": "评价结果更新项目相关薄弱点，新路径保留代码实践并优先安排未掌握的模型选择或调参内容。"
+    }
+  ]
+}

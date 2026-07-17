@@ -52,6 +52,9 @@ class Settings:
     profile_mode: str
     planner_mode: str
     llm: LLMSettings = field(default_factory=LLMSettings)
+    resource_cache_enabled: bool = True
+    resource_cache_ttl_seconds: float = 1800.0
+    resource_cache_max_entries: int = 128
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,5 +86,15 @@ class Settings:
                 base_url=os.getenv("LLM_BASE_URL", ""),
                 timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
                 max_retries=int(os.getenv("LLM_MAX_RETRIES", "1")),
+            ),
+            resource_cache_enabled=_env_bool(
+                "EDUAGENT_RESOURCE_CACHE_ENABLED",
+                True,
+            ),
+            resource_cache_ttl_seconds=float(
+                os.getenv("EDUAGENT_RESOURCE_CACHE_TTL_SECONDS", "1800")
+            ),
+            resource_cache_max_entries=int(
+                os.getenv("EDUAGENT_RESOURCE_CACHE_MAX_ENTRIES", "128")
             ),
         )

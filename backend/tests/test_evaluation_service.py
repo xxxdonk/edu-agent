@@ -6,37 +6,27 @@ path adjustments per the BE-002 fix.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from app.database import Repository, SQLiteDatabase
 from app.evaluation import EvaluationAgent, EvaluationService
-from app.schemas import EvaluationSubmission, LearningPath, LearningPathStep, StudentProfile
-
-
-class _MockRepo:
-    def __init__(self) -> None:
-        self.profiles: dict[tuple[str, int], StudentProfile] = {}
-        self.paths: dict[str, LearningPath] = {}
-        self._latest: dict[str, int] = {}
-
-    def get_latest_profile(self, student_id: str) -> StudentProfile | None:
-        version = self._latest.get(student_id)
-        if version is None:
-            return None
-        return self.profiles.get((student_id, version))
-
-    def save_profile(self, profile: StudentProfile) -> None:
-        self.profiles[(profile.student_id, profile.version)] = profile
-        cur = self._latest.get(profile.student_id, 0)
-        if profile.version > cur:
-            self._latest[profile.student_id] = profile.version
-
-    def get_path(self, path_id: str) -> LearningPath | None:
-        return self.paths.get(path_id)
-
-    def save_path(self, path: LearningPath) -> None:
-        self.paths[path.path_id] = path
+from app.evaluation.evaluator import EvaluationConfigurationError
+from app.schemas import (
+    Difficulty,
+    EvaluationSubmission,
+    LearningPath,
+    LearningPathStep,
+    Resource,
+    ResourceType,
+    SourceReference,
+    StudentProfile,
+    TaskState,
+    TaskStatus,
+)
 
 
 class _MockProfileAgent:
@@ -96,6 +86,96 @@ class _MockPlannerAgent:
 
 
 @pytest.fixture
+def repository(tmp_path: Path) -> Repository:
+    database = SQLiteDatabase(tmp_path / "evaluation-service.db")
+    database.initialize()
+    return Repository(database)
+
+
+def _learning_path(student_id: str, path_id: str = "path-1") -> LearningPath:
+    return LearningPath(
+        path_id=path_id,
+        student_id=student_id,
+        profile_version=1,
+        course="机器学习",
+        steps=[
+            LearningPathStep(
+                step=1,
+                topic="机器学习概述",
+                learning_goal="了解基本概念",
+                reason="入门",
+                recommended_resources=["explanation"],
+                completion_criteria=["通过"],
+                estimated_minutes=30,
+                prerequisites=[],
+            )
+        ],
+        adjustment_reason=None,
+        generation_mode="development_rule_based",
+        created_at="2026-07-15T08:00:00Z",
+    )
+
+
+def _save_quiz(
+    repository: Repository,
+    *,
+    student_id: str,
+    topic: str = "机器学习概述",
+) -> str:
+    task_id = str(uuid4())
+    resource_id = str(uuid4())
+    question_id = f"{resource_id}::q1"
+    repository.save_task(
+        TaskState(
+            task_id=task_id,
+            task_type="resource_generation",
+            student_id=student_id,
+            status=TaskStatus.COMPLETED,
+            progress=100,
+            current_stage="completed",
+        )
+    )
+    repository.save_resource(
+        Resource(
+            resource_id=resource_id,
+            resource_type=ResourceType.QUIZ,
+            title=f"{topic} 测验",
+            content=json.dumps(
+                {
+                    "topic": topic,
+                    "questions": [
+                        {
+                            "id": question_id,
+                            "type": "single_choice",
+                            "level": "basic",
+                            "question": "机器学习的主要任务是什么？",
+                            "options": ["A. 从数据中学习规律", "B. 仅存储数据"],
+                            "answer": "A",
+                            "explanation": "机器学习从数据中学习可泛化的规律。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            content_format="json",
+            target_topic=topic,
+            difficulty=Difficulty.BEGINNER,
+            personalization_reason="依据当前学习路径步骤生成真实评价题目",
+            source_references=[
+                SourceReference(
+                    source_id="ml-overview",
+                    title="机器学习基础",
+                    locator="data/machine_learning/01-overview.md",
+                )
+            ],
+            review_status="approved",
+        ),
+        task_id=task_id,
+    )
+    return question_id
+
+
+@pytest.fixture
 def base_profile() -> StudentProfile:
     from app.schemas.profile import FieldEvidence, ProfileField, TimeBudget
 
@@ -130,31 +210,11 @@ def base_profile() -> StudentProfile:
     )
 
 
-def test_evaluation_with_failing_score_triggers_updates(base_profile):
-    repo = _MockRepo()
-    repo.profiles[(base_profile.student_id, base_profile.version)] = base_profile
-    repo._latest[base_profile.student_id] = base_profile.version
-    repo.paths["path-1"] = LearningPath(
-        path_id="path-1",
-        student_id=base_profile.student_id,
-        profile_version=1,
-        course="机器学习",
-        steps=[
-            LearningPathStep(
-                step=1,
-                topic="机器学习概述",
-                learning_goal="了解基本概念",
-                reason="入门",
-                recommended_resources=["explanation"],
-                completion_criteria=["通过"],
-                estimated_minutes=30,
-                prerequisites=[],
-            )
-        ],
-        adjustment_reason=None,
-        generation_mode="development_rule_based",
-        created_at="2026-07-15T08:00:00Z",
-    )
+def test_evaluation_with_failing_score_triggers_updates(base_profile, repository):
+    repo = repository
+    repo.save_profile(base_profile)
+    repo.save_path(_learning_path(base_profile.student_id))
+    question_id = _save_quiz(repo, student_id=base_profile.student_id)
 
     profile_agent = _MockProfileAgent()
     planner_agent = _MockPlannerAgent()
@@ -170,7 +230,7 @@ def test_evaluation_with_failing_score_triggers_updates(base_profile):
         student_id=base_profile.student_id,
         path_id="path-1",
         step=1,
-        answers=[{"question_id": "q-1", "response": ""}, {"question_id": "q-2", "response": "x"}],
+        answers=[{"question_id": question_id, "response": "B"}],
         time_spent_minutes=15,
     )
 
@@ -186,10 +246,11 @@ def test_evaluation_with_failing_score_triggers_updates(base_profile):
     assert repo.get_latest_profile(base_profile.student_id).version == 2
 
 
-def test_evaluation_with_passing_score_skips_updates(base_profile):
-    repo = _MockRepo()
-    repo.profiles[(base_profile.student_id, base_profile.version)] = base_profile
-    repo._latest[base_profile.student_id] = base_profile.version
+def test_evaluation_with_passing_score_skips_updates(base_profile, repository):
+    repo = repository
+    repo.save_profile(base_profile)
+    repo.save_path(_learning_path(base_profile.student_id))
+    question_id = _save_quiz(repo, student_id=base_profile.student_id)
 
     profile_agent = _MockProfileAgent()
     planner_agent = _MockPlannerAgent()
@@ -207,12 +268,8 @@ def test_evaluation_with_passing_score_skips_updates(base_profile):
         step=1,
         answers=[
             {
-                "question_id": "q-overview-basic",
-                "response": (
-                    "这是一个详细的答案，包含了所有必要的知识点，并且解释得相当充分，"
-                    "涵盖了机器学习的基本概念和分类，包括监督学习、无监督学习和"
-                    "强化学习的区别。"
-                ),
+                "question_id": question_id,
+                "response": "A",
             },
         ],
         time_spent_minutes=20,
@@ -226,8 +283,11 @@ def test_evaluation_with_passing_score_skips_updates(base_profile):
     assert len(planner_agent.calls) == 0
 
 
-def test_evaluation_handles_missing_profile_gracefully():
-    repo = _MockRepo()
+def test_evaluation_handles_missing_profile_gracefully(repository):
+    repo = repository
+    student_id = "nonexistent-student"
+    repo.save_path(_learning_path(student_id, path_id="path-x"))
+    question_id = _save_quiz(repo, student_id=student_id)
     profile_agent = _MockProfileAgent()
     planner_agent = _MockPlannerAgent()
 
@@ -239,10 +299,10 @@ def test_evaluation_handles_missing_profile_gracefully():
     )
 
     submission = EvaluationSubmission(
-        student_id="nonexistent-student",
+        student_id=student_id,
         path_id="path-x",
         step=1,
-        answers=[{"question_id": "q-1", "response": "test"}],
+        answers=[{"question_id": question_id, "response": "B"}],
         time_spent_minutes=10,
     )
 
@@ -251,3 +311,21 @@ def test_evaluation_handles_missing_profile_gracefully():
     assert result_model.result is not None
     assert result_model.updated_profile is None
     assert result_model.updated_path is None
+
+
+def test_evaluator_without_repository_fails_with_configuration_error():
+    submission = EvaluationSubmission(
+        student_id="stu-test-1",
+        path_id="path-1",
+        step=1,
+        answers=[{"question_id": "resource-id::q1", "response": "A"}],
+        time_spent_minutes=5,
+    )
+
+    with pytest.raises(EvaluationConfigurationError, match="repository is not configured"):
+        asyncio.run(
+            EvaluationAgent().evaluate(
+                submission,
+                expected_topic="机器学习概述",
+            )
+        )

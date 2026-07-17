@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from app.database import Repository
 from app.schemas import (
     EvaluationResult,
     EvaluationSubmission,
@@ -19,6 +20,8 @@ from app.schemas import (
     ProfileChatRequest,
     StudentProfile,
 )
+
+from .evaluator import EvaluationValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +49,17 @@ class PlannerAgentProtocol(Protocol):
     ) -> LearningPath: ...
 
 
-class RepositoryProtocol(Protocol):
-    """Repository 的最小接口协议。"""
+class EvaluationAgentProtocol(Protocol):
+    """Persisted-quiz evaluator interface used by the service."""
 
-    def get_latest_profile(self, student_id: str) -> StudentProfile | None: ...
+    def bind_repository(self, repository: Repository) -> None: ...
 
-    def save_profile(self, profile: StudentProfile) -> None: ...
-
-    def get_path(self, path_id: str) -> LearningPath | None: ...
-
-    def save_path(self, path: LearningPath) -> None: ...
+    async def evaluate(
+        self,
+        submission: EvaluationSubmission,
+        *,
+        expected_topic: str,
+    ) -> tuple[EvaluationResult, dict, dict]: ...
 
 
 @dataclass
@@ -83,15 +87,16 @@ class EvaluationService:
 
     def __init__(
         self,
-        evaluator: Any,
+        evaluator: EvaluationAgentProtocol,
         profile_agent: ProfileAgentProtocol,
         planner_agent: PlannerAgentProtocol,
-        repository: RepositoryProtocol,
+        repository: Repository,
     ) -> None:
         self._evaluator = evaluator
         self._profile_agent = profile_agent
         self._planner_agent = planner_agent
         self._repository = repository
+        self._evaluator.bind_repository(repository)
 
     async def process(
         self,
@@ -103,9 +108,28 @@ class EvaluationService:
             EvaluationResultModel containing the evaluation result and any
             updated profile/path objects that were persisted.
         """
-        # 1. 执行评价
+        path = self._repository.get_path(submission.path_id)
+        if path is None:
+            raise EvaluationValidationError(
+                f"learning path not found: {submission.path_id}"
+            )
+        if path.student_id != submission.student_id:
+            raise EvaluationValidationError(
+                "learning path does not belong to student_id"
+            )
+        path_step = next(
+            (item for item in path.steps if item.step == submission.step),
+            None,
+        )
+        if path_step is None:
+            raise EvaluationValidationError(
+                "step does not exist in the submitted learning path"
+            )
+
+        # 1. 使用持久化 Quiz 的答案键执行评价
         result, profile_updates, path_updates = await self._evaluator.evaluate(
-            submission
+            submission,
+            expected_topic=path_step.topic,
         )
 
         updated_profile: StudentProfile | None = None
@@ -210,7 +234,13 @@ class EvaluationService:
                 previous_path=previous_path,
                 previous_path_id=submission.path_id,
                 evaluation_summary=evaluation_summary,
+                target_topics=path_updates.get("revisit_topics") or None,
             )
+            if not new_path.adjustment_reason:
+                weak_topics = "、".join(result.weak_topics) or "当前学习步骤"
+                new_path = new_path.model_copy(
+                    update={"adjustment_reason": f"根据评价结果优先复习：{weak_topics}"}
+                )
             self._repository.save_path(new_path)
             logger.info(
                 "path_updated student_id=%s new_path_id=%s",
@@ -230,7 +260,7 @@ class EvaluationService:
         """将评价结果转为自然语言消息，供 ProfileAgent 提取事实。"""
         weak = "、".join(result.weak_topics) if result.weak_topics else "无"
         return (
-            f"学习评价反馈：经过第{result.step}步学习，"
+            f"学习评价证据（来源：evaluation）：经过第{result.step}步学习，"
             f"我完成了练习测验，掌握度为{result.mastery_score:.0%}，"
             f"{'通过了测评' if result.passed else '未通过测评'}。"
             f"薄弱知识点：{weak}。"

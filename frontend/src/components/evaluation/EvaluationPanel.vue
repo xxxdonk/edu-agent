@@ -16,8 +16,8 @@
               <el-radio v-for="option in question.options" :key="option" :value="option.slice(0, 1)">{{ option }}</el-radio>
             </el-radio-group>
             <el-input v-else v-model="answers[question.id]" type="textarea" :rows="3" placeholder="请输入你的回答" />
-            <div v-if="result" class="answer-review" :class="{'answer-review--correct': resultLine(question.id)?.includes('正确')}">
-              <strong>{{ resultLine(question.id) || '已完成评价' }}</strong>
+            <div v-if="result" class="answer-review" :class="`answer-review--${questionResult(question.id).status}`">
+              <strong>{{ questionResult(question.id).line || '已完成评价' }}</strong>
               <p>参考答案：{{ question.answer }}</p>
               <p>解析：{{ question.explanation }}</p>
             </div>
@@ -51,7 +51,7 @@ import {computed, reactive, ref, watch} from 'vue';
 import {Checked} from '@element-plus/icons-vue';
 import DiffComparison from './DiffComparison.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
-import {pathDiff, profileDiff} from '@/utils/content';
+import {evaluationQuestionFeedback, pathDiff, profileDiff} from '@/utils/content';
 import type {EvaluationResult, LearningPath, QuizDocument, StudentProfile, ViewStatus} from '@/types/api';
 
 const props = defineProps<{
@@ -63,12 +63,18 @@ defineEmits<{(event: 'submit', answers: Record<string, string>, minutes: number)
 const answers = reactive<Record<string, string>>({});
 const timeSpent = ref(12);
 const allAnswered = computed(() => props.quiz?.questions.every((question) => answers[question.id]?.trim()) ?? false);
+const quizFingerprint = computed(() => JSON.stringify(
+  props.quiz?.questions.map((question) => ({id: question.id, question: question.question, options: question.options})) ?? [],
+));
 const profileRows = computed(() => profileDiff(props.previousProfile, props.profile));
 const pathRows = computed(() => pathDiff(props.previousPath, props.path));
 const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用代码实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与代码资源后再次练习。`);
 
-watch(() => props.quiz?.topic, () => { Object.keys(answers).forEach((key) => delete answers[key]); });
+watch(quizFingerprint, () => {
+  Object.keys(answers).forEach((key) => delete answers[key]);
+  timeSpent.value = 12;
+});
 function levelLabel(level: string) { return ({basic: '基础', intermediate: '进阶', advanced: '挑战'} as Record<string, string>)[level] ?? level; }
 function typeLabel(type: string) { return ({single_choice: '单选题', short_answer: '简答题', comprehensive: '综合题'} as Record<string, string>)[type] ?? type; }
-function resultLine(questionId: string) { return props.result?.feedback.split('\n').find((line) => line.includes(`题目 ${questionId}`)); }
+function questionResult(questionId: string) { return evaluationQuestionFeedback(props.result?.feedback ?? '', questionId); }
 </script>

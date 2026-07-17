@@ -29,7 +29,7 @@
         <dl class="resource-metadata">
           <div><dt>目标知识点</dt><dd>{{ selectedResource.target_topic }}</dd></div>
           <div><dt>个性化原因</dt><dd>{{ selectedResource.personalization_reason }}</dd></div>
-          <div><dt>内容来源</dt><dd>{{ selectedResource.source_references.map((item) => item.title).join('、') }}</dd></div>
+          <div><dt>内容来源</dt><dd>{{ formatSourceTitles(selectedResource.source_references) }}</dd></div>
           <div><dt>审校状态</dt><dd>{{ reviewLabel[selectedResource.review_status] }}</dd></div>
           <div><dt>创建时间</dt><dd>{{ formatDate(selectedResource.created_at) }}</dd></div>
         </dl>
@@ -40,7 +40,12 @@
             </div>
           </el-collapse-item>
         </el-collapse>
-        <ResourcePreview :resource="selectedResource" />
+        <StatusBanner
+          v-if="selectedResource.review_status === 'rejected'"
+          status="error"
+          message="该资源未通过 Reviewer 安全审校，内容已阻止展示，请重新生成。"
+        />
+        <ResourcePreview v-else :resource="selectedResource" />
       </article>
     </div>
   </section>
@@ -52,6 +57,7 @@ import {Collection, DataAnalysis, Document, MagicStick, Notebook, Tickets} from 
 import ResourcePreview from './ResourcePreview.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
 import type {Difficulty, Resource, ResourceType, ReviewStatus, ViewStatus} from '@/types/api';
+import {formatSourceTitles} from '@/utils/content';
 
 const props = defineProps<{resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean}>();
 defineEmits<{(event: 'generate'): void}>();
