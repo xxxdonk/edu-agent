@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import Field, model_validator
@@ -26,6 +27,28 @@ _PROFILE_FIELD_NAMES = {
     "resource_preference",
     "time_budget",
 }
+_WEAK_TOPIC_PREFIX = re.compile(
+    r"^(?:(?:薄弱点|知识点|未掌握|需要加强|主题|点)\s*[:：]\s*)+"
+)
+
+
+def _normalize_weak_topics(values: Any) -> Any:
+    """Clean explicit labels while preserving ordinary topic punctuation."""
+
+    if not isinstance(values, list):
+        return values
+    normalized: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            normalized.append(value)
+            continue
+        topic = _WEAK_TOPIC_PREFIX.sub("", value.strip()).strip()
+        if not topic or topic in seen:
+            continue
+        seen.add(topic)
+        normalized.append(topic)
+    return normalized
 
 
 class ProfileExtractionDraft(ApiModel):
@@ -55,6 +78,10 @@ class ProfileExtractionDraft(ApiModel):
 
             field = dict(raw_field)
             field_value = field.get("value")
+            if field_name == "weak_topics":
+                field_value = _normalize_weak_topics(field_value)
+                field["value"] = field_value
+                normalized[field_name] = field
             is_empty = (
                 field_value is None
                 or field_value == []

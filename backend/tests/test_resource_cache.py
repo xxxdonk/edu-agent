@@ -473,10 +473,11 @@ def test_private_prompt_payloads_are_compact_but_keep_new_evidence() -> None:
             ["梯度下降"],
         )
     )
-    assert planner_payload["evaluation_summary"] == evaluation_summary
-    assert planner_payload["target_topics"] == ["梯度下降"]
+    assert planner_payload["task"] == "replan_after_evaluation"
+    assert planner_payload["adjustment_reason"] == evaluation_summary
+    assert planner_payload["unmastered_topics"] == ["梯度下降"]
     assert planner_payload["constraints"]["max_minutes_per_step"] == 45
     assert planner_payload["constraints"]["priority_topics"] == ["梯度下降"]
-    assert "updated_at" not in planner_payload["profile"]
-    assert "created_at" not in planner_payload["previous_path"]
-    assert planner_payload["previous_path"]["steps"][0]["topic"]
+    assert "updated_at" not in planner_payload["profile_summary"]
+    assert "created_at" not in planner_payload["current_path_summary"]
+    assert planner_payload["current_path_summary"]["steps"][0]["topic"]

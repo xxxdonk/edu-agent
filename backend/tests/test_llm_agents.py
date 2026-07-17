@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
+from pydantic import ValidationError
 
 from app.llm import (
     FakeLLMClient,
@@ -12,6 +14,7 @@ from app.llm import (
 )
 from app.llm.openai_compatible import OpenAICompatibleLLMClient
 from app.planner import PlannerAgent
+from app.planner.models import LearningPathDraft
 from app.profile import DevelopmentProfileAgent, ProfileAgent
 from app.profile.models import ProfileExtractionDraft
 from app.schemas import ProfileChatRequest, ResourceType
@@ -535,23 +538,35 @@ def test_fake_llm_planner_success_is_ordered_and_respects_time_budget() -> None:
     assert all(step.completion_criteria for step in path.steps)
 
 
-def test_planner_invalid_response_falls_back() -> None:
+def test_planner_invalid_response_falls_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="app.planner.agent")
     profile = _development_profile()
+    profile = profile.model_copy(
+        update={
+            "weak_topics": profile.weak_topics.model_copy(
+                update={"value": ["点：数学基础"]}
+            )
+        }
+    )
     invalid = _path_draft()
-    invalid["steps"][1]["step"] = 3
+    invalid["steps"][1]["prerequisites"] = ["尚未安排的主题"]
     fake = FakeLLMClient([invalid, invalid])
     path = asyncio.run(
         PlannerAgent(fake, enable_llm=True).generate(profile)
     )
     assert path.generation_mode == "development_rule_based"
     assert [step.step for step in path.steps] == list(range(1, len(path.steps) + 1))
+    assert all(not step.topic.startswith("点：") for step in path.steps)
     assert len(fake.calls) == 2
+    assert "planner_llm_fallback" in caplog.text
 
 
 def test_planner_repairs_one_invalid_structured_response() -> None:
     profile = _development_profile()
     invalid = _path_draft()
-    invalid["steps"][1]["step"] = 3
+    invalid["steps"][1]["prerequisites"] = ["尚未安排的主题"]
     fake = FakeLLMClient([invalid, _path_draft()])
 
     path = asyncio.run(PlannerAgent(fake, enable_llm=True).generate(profile))
@@ -559,6 +574,93 @@ def test_planner_repairs_one_invalid_structured_response() -> None:
     assert path.generation_mode == "llm_structured"
     assert len(fake.calls) == 2
     assert "FORMAT REPAIR" in fake.calls[1]["system_prompt"]
+    assert "prerequisite does not reference an earlier topic" in fake.calls[1][
+        "system_prompt"
+    ]
+    assert "严格目标 JSON 结构" in fake.calls[1]["system_prompt"]
+    assert "仅返回修复后的完整 JSON 对象" in fake.calls[1]["system_prompt"]
+
+
+def test_planner_repair_includes_pydantic_field_error() -> None:
+    profile = _development_profile()
+    invalid = _path_draft()
+    del invalid["steps"][0]["learning_goal"]
+    fake = FakeLLMClient([invalid, _path_draft()])
+
+    path = asyncio.run(PlannerAgent(fake, enable_llm=True).generate(profile))
+
+    assert path.generation_mode == "llm_structured"
+    assert len(fake.calls) == 2
+    assert "steps.0.learning_goal: missing" in fake.calls[1]["system_prompt"]
+
+
+def test_private_planner_draft_normalizes_only_safe_formats() -> None:
+    raw = _path_draft()
+    raw["steps"][0].update(
+        {
+            "step": 8,
+            "topic": "点：数学基础",
+            "estimated_minutes": "30",
+            "prerequisites": None,
+        }
+    )
+    raw["steps"][1]["step"] = 12
+    raw["steps"][1]["recommended_resources"] = "quiz"
+    raw["steps"][2]["step"] = 20
+    raw["total_estimated_minutes"] = "90"
+
+    draft = LearningPathDraft.model_validate(raw)
+
+    assert [step.step for step in draft.steps] == [1, 2, 3]
+    assert draft.steps[0].topic == "数学基础"
+    assert draft.steps[0].estimated_minutes == 30
+    assert draft.steps[0].prerequisites == []
+    assert draft.steps[1].recommended_resources == [ResourceType.QUIZ]
+    assert draft.total_estimated_minutes == 90
+
+
+def test_private_planner_draft_does_not_invent_missing_core_content() -> None:
+    raw = _path_draft()
+    del raw["steps"][0]["learning_goal"]
+
+    with pytest.raises(ValidationError):
+        LearningPathDraft.model_validate(raw)
+
+
+def test_planner_replan_uses_minimal_input_and_cleans_topic_prefix() -> None:
+    profile = _development_profile()
+    initial = asyncio.run(
+        PlannerAgent(FakeLLMClient([_path_draft()]), enable_llm=True).generate(profile)
+    )
+    updated_draft = _path_draft()
+    updated_draft["steps"][0]["topic"] = "知识点：数学基础"
+    updated_draft["adjustment_reason"] = "根据评价优先巩固数学基础"
+    fake = FakeLLMClient([updated_draft])
+
+    path = asyncio.run(
+        PlannerAgent(fake, enable_llm=True).generate(
+            profile,
+            previous_path=initial,
+            evaluation_summary="掌握度较低，需要继续巩固数学基础",
+            target_topics=["点：数学基础"],
+        )
+    )
+
+    payload = json.loads(fake.calls[0]["messages"][0].content)
+    assert set(payload) == {
+        "task",
+        "profile_summary",
+        "unmastered_topics",
+        "current_path_summary",
+        "adjustment_reason",
+        "constraints",
+    }
+    assert payload["task"] == "replan_after_evaluation"
+    assert payload["unmastered_topics"] == ["数学基础"]
+    assert payload["adjustment_reason"]
+    assert path.generation_mode == "llm_structured"
+    assert path.steps[0].topic == "数学基础"
+    assert path.adjustment_reason == "根据评价优先巩固数学基础"
 
 
 def test_openai_compatible_client_rejects_missing_configuration_without_network() -> None:
@@ -583,6 +685,84 @@ def test_private_profile_draft_clears_evidence_for_empty_list() -> None:
     assert draft.weak_topics.value == []
     assert draft.weak_topics.evidence == []
     assert draft.weak_topics.confidence == 0
+
+
+def test_private_profile_draft_normalizes_weak_topic_labels_safely() -> None:
+    raw = _complete_profile_draft()
+    raw["weak_topics"] = _list(
+        [
+            "薄弱点：逻辑回归",
+            "知识点：梯度下降",
+            "点：模型评估",
+            "需要加强：ROC/AUC",
+            "Python：从基础到实践",
+            "",
+            "主题：逻辑回归",
+        ],
+        [_evidence("inference", "推断：评价知识点归一化", None)],
+        0.8,
+    )
+
+    draft = ProfileExtractionDraft.model_validate(raw)
+
+    assert draft.weak_topics.value == [
+        "逻辑回归",
+        "梯度下降",
+        "模型评估",
+        "ROC/AUC",
+        "Python：从基础到实践",
+    ]
+
+
+def test_profile_evaluation_update_keeps_evidence_and_cleans_weak_topics() -> None:
+    student_id = "profile-evaluation-normalization"
+    previous = DevelopmentProfileAgent().extract(
+        _complete_request(student_id),
+        None,
+    ).profile
+    summary = (
+        "学习评价证据（来源：evaluation）：掌握度较低；"
+        "薄弱点：逻辑回归；需要加强：ROC/AUC。"
+    )
+    request = ProfileChatRequest(
+        student_id=student_id,
+        conversation_id="evaluation-normalization",
+        messages=[
+            ChatMessage(
+                message_id="evaluation-system",
+                role="assistant",
+                content="系统依据独立评价更新画像；本消息不是学生原话。",
+            )
+        ],
+        evaluation_summary=summary,
+    )
+    draft = _complete_profile_draft("evaluation-system")
+    draft["weak_topics"] = _list(
+        ["薄弱点：逻辑回归", "需要加强：ROC/AUC"],
+        [_evidence("conversation", "不在当前请求中的旧原文", "missing-message")],
+        0.9,
+    )
+
+    response = asyncio.run(
+        ProfileAgent(FakeLLMClient([draft]), enable_llm=True).extract(
+            request,
+            previous,
+        )
+    )
+
+    assert response.profile.version == previous.version + 1
+    assert "逻辑回归" in response.profile.weak_topics.value
+    assert "ROC/AUC" in response.profile.weak_topics.value
+    assert all(
+        not topic.startswith(
+            ("薄弱点：", "知识点：", "未掌握：", "需要加强：", "主题：", "点：")
+        )
+        for topic in response.profile.weak_topics.value
+    )
+    assert any(
+        evidence.source == "evaluation" and evidence.quote == summary
+        for evidence in response.profile.weak_topics.evidence
+    )
 
 
 def test_private_profile_draft_zeros_confidence_for_null() -> None:

@@ -17,8 +17,8 @@ from app.llm import (
 from app.llm.errors import safe_error_summary
 from app.schemas import LearningPath, LearningPathStep, ResourceType, StudentProfile
 from app.schemas.common import Difficulty, utc_now
-from .models import LearningPathDraft
-from .prompts import PLANNER_SYSTEM_PROMPT
+from .models import LearningPathDraft, _clean_topic_label
+from .prompts import PLANNER_SYSTEM_PROMPT, planner_format_repair_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +74,13 @@ class DevelopmentPlannerAgent:
 
     @staticmethod
     def _topics(profile: StudentProfile) -> list[str]:
-        topics = list(profile.weak_topics.value)
+        topics = [
+            cleaned
+            for item in profile.weak_topics.value
+            if (cleaned := _clean_topic_label(item))
+        ]
         for goal in profile.learning_goals.value:
-            topic = DevelopmentPlannerAgent._goal_topic(goal)
+            topic = _clean_topic_label(DevelopmentPlannerAgent._goal_topic(goal))
             if topic not in topics:
                 topics.append(topic)
         if not topics:
@@ -196,7 +200,10 @@ class PlannerAgent:
                 student_id=profile.student_id,
                 profile_version=profile.version,
                 course=profile.course.value or "机器学习基础",
-                steps=draft.steps,
+                steps=[
+                    LearningPathStep.model_validate(step.model_dump(mode="json"))
+                    for step in draft.steps
+                ],
                 adjustment_reason=adjustment_reason,
                 generation_mode="llm_structured",
                 created_at=utc_now(),
@@ -222,14 +229,13 @@ class PlannerAgent:
             evaluation_summary,
             target_topics,
         )
+        repair_error_summary: str | None = None
         for attempt in range(2):
-            system_prompt = PLANNER_SYSTEM_PROMPT
-            if attempt:
-                system_prompt += (
-                    "\nFORMAT REPAIR: Regenerate the complete JSON object once. "
-                    "Follow the schema and every constraint exactly; do not add "
-                    "fields, commentary, or Markdown."
-                )
+            system_prompt = (
+                planner_format_repair_prompt(repair_error_summary or "unknown")
+                if attempt
+                else PLANNER_SYSTEM_PROMPT
+            )
             try:
                 draft = await self._llm_client.generate_structured(
                     system_prompt=system_prompt,
@@ -247,9 +253,10 @@ class PlannerAgent:
             ) as error:
                 if attempt:
                     raise
+                repair_error_summary = self._validation_error_summary(error)
                 logger.warning(
                     "planner_format_repair requested=true error=%s",
-                    safe_error_summary(error),
+                    repair_error_summary,
                 )
         raise LLMValidationError("planner format repair exhausted")
 
@@ -260,66 +267,86 @@ class PlannerAgent:
         evaluation_summary: str | None,
         target_topics: list[str] | None,
     ) -> str:
-        payload = {
-            "profile": PlannerAgent._compact_profile(profile),
-            "course": profile.course.value or "机器学习基础",
-            "constraints": {
-                "max_minutes_per_step": (
-                    profile.time_budget.value.minutes_per_day
-                    if profile.time_budget.value
-                    else 45
-                ),
-                "priority_topics": list(profile.weak_topics.value),
-                "step_numbers_must_be_contiguous": True,
-                "topics_must_be_unique": True,
-            },
-            "previous_path": (
-                PlannerAgent._compact_previous_path(previous_path)
-                if previous_path
-                else None
+        priority_topics = PlannerAgent._normalize_topics(
+            target_topics or list(profile.weak_topics.value)
+        )
+        constraints = {
+            "max_minutes_per_step": (
+                profile.time_budget.value.minutes_per_day
+                if profile.time_budget.value
+                else 45
             ),
-            "evaluation_summary": evaluation_summary,
-            "target_topics": target_topics or [],
-            "knowledge_base_available": False,
+            "priority_topics": priority_topics,
+            "step_numbers_must_be_contiguous": True,
+            "topics_must_be_unique": True,
+            "prerequisites_must_reference_earlier_topics": True,
         }
+        if previous_path or evaluation_summary:
+            payload = {
+                "task": "replan_after_evaluation",
+                "profile_summary": PlannerAgent._profile_summary(profile),
+                "unmastered_topics": priority_topics,
+                "current_path_summary": (
+                    PlannerAgent._compact_previous_path(previous_path)
+                    if previous_path
+                    else None
+                ),
+                "adjustment_reason": evaluation_summary,
+                "constraints": constraints,
+            }
+        else:
+            payload = {
+                "task": "create_initial_path",
+                "profile_summary": PlannerAgent._profile_summary(profile),
+                "target_topics": priority_topics,
+                "constraints": constraints,
+            }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
-    def _compact_profile(profile: StudentProfile) -> dict[str, object]:
-        compact: dict[str, object] = {
-            "student_id": profile.student_id,
-            "version": profile.version,
-            "confidence": profile.confidence,
+    def _profile_summary(profile: StudentProfile) -> dict[str, object]:
+        return {
+            "major": profile.major.value,
+            "course": profile.course.value,
+            "knowledge_level": profile.knowledge_level.value,
+            "learning_goals": list(profile.learning_goals.value),
+            "weak_topics": PlannerAgent._normalize_topics(profile.weak_topics.value),
+            "cognitive_style": profile.cognitive_style.value,
+            "resource_preference": list(profile.resource_preference.value),
+            "time_budget_minutes": (
+                profile.time_budget.value.minutes_per_day
+                if profile.time_budget.value
+                else 45
+            ),
         }
-        for field_name in (
-            "major",
-            "course",
-            "knowledge_level",
-            "learning_goals",
-            "weak_topics",
-            "learning_history",
-            "cognitive_style",
-            "language_preference",
-            "resource_preference",
-            "time_budget",
-        ):
-            profile_field = getattr(profile, field_name)
-            value = profile_field.value
-            compact[field_name] = {
-                "value": value.model_dump(mode="json")
-                if hasattr(value, "model_dump")
-                else value,
-                "confidence": profile_field.confidence,
-            }
-        return compact
+
+    @staticmethod
+    def _normalize_topics(topics: list[str]) -> list[str]:
+        normalized = [
+            cleaned for item in topics if (cleaned := _clean_topic_label(item))
+        ]
+        return list(dict.fromkeys(normalized))
+
+    @staticmethod
+    def _validation_error_summary(error: BaseException) -> str:
+        validation_error: ValidationError | None = None
+        if isinstance(error, ValidationError):
+            validation_error = error
+        elif isinstance(error.__cause__, ValidationError):
+            validation_error = error.__cause__
+        if validation_error is None:
+            return safe_error_summary(error)
+
+        details: list[str] = []
+        for item in validation_error.errors(include_url=False)[:4]:
+            location = ".".join(str(part) for part in item.get("loc", ())) or "root"
+            details.append(f"{location}: {item.get('type', 'validation_error')}")
+        return "pydantic_validation_error: " + "; ".join(details)
 
     @staticmethod
     def _compact_previous_path(path: LearningPath) -> dict[str, object]:
         return {
-            "path_id": path.path_id,
-            "profile_version": path.profile_version,
             "course": path.course,
-            "status": path.status,
             "steps": [
                 {
                     "step": step.step,
@@ -331,8 +358,6 @@ class PlannerAgent:
                 }
                 for step in path.steps
             ],
-            "adjustment_reason": path.adjustment_reason,
-            "generation_mode": path.generation_mode,
         }
 
     @staticmethod

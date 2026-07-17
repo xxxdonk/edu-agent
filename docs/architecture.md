@@ -220,3 +220,11 @@ SQLite 启用 WAL、外键和事务。事件序号使用写事务分配，避免
 - fallback 和 cache hit 均显式可识别。
 - 自动测试使用 Fake LLM，不访问真实网络。
 - OpenAPI 和公共 Schema 由契约测试冻结。
+
+## 13. 封版稳定性边界
+
+Profile 在私有输入和合并边界清理 weak_topics 的明确标签：`薄弱点：`、`知识点：`、`未掌握：`、`需要加强：`、`主题：`、`点：`。清理只作用于字段开头的固定标签，普通主题如“Python：从基础到实践”保持不变；值去重时仍合并原始 `source=evaluation` 证据。StudentProfile 公共 Schema、画像版本和 Evaluation 响应均不变化。
+
+Planner 私有 Draft 对数字字符串、空 prerequisites、单资源字符串、step 编号和明确 topic 标签做安全归一化；缺失的核心内容不会补造。一次修复请求包含错误摘要和目标 JSON 结构，第二次失败仍显式 fallback。专项真实验证曾连续三次评价后保持 `llm_structured`。
+
+`scripts/preflight_demo.py` 不运行完整资源链路，只验证本机依赖、模型配置存在性、8 章课程知识库、数据目录、端口、公共契约、案例和提交卫生。一键启动在创建进程前调用预检。资源缓存仍是单进程 TTL/LRU，默认 TTL 1800 秒、容量 128；真实冷链路受 DeepSeek 波动影响，可能超过两分钟。
