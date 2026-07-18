@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -237,7 +238,7 @@ class TestResourceAgentHeuristicGeneration:
         agent = ExplanationAgent(llm_client=None, enable_llm=False)
         resource = await agent.generate(context)
         reviewer = ReviewerAgent()
-        reviewed, review_dict = await reviewer.review(resource, context)
+        reviewed = await reviewer.review(resource, context)
         assert reviewed.review_status in ("approved", "needs_revision", "rejected")
 
     @pytest.mark.asyncio
@@ -247,7 +248,7 @@ class TestResourceAgentHeuristicGeneration:
         # Use a proper resource by generating one and then stripping references
         agent = ExplanationAgent(llm_client=None, enable_llm=False)
         resource = await agent.generate(context)
-        reviewed, review_dict = await reviewer.review(resource, context)
+        reviewed = await reviewer.review(resource, context)
         # Should have source references from RAG, but if not, that's also valid
         assert reviewed.review_status in ("approved", "needs_revision", "rejected")
 
@@ -258,30 +259,71 @@ class TestResourceAgentHeuristicGeneration:
 
 
 class TestEvaluationAgentLLMIntegration:
-    def test_evaluation_agent_init_with_llm_client(self):
+    def test_evaluation_agent_init_default(self):
         from app.evaluation import EvaluationAgent
 
-        agent = EvaluationAgent(None, enable_llm=True)
+        agent = EvaluationAgent()
         assert agent.agent_name == "evaluation_agent"
 
-    def test_evaluation_agent_heuristic_fallback_on_missing_client(self):
+    def test_evaluation_agent_evaluate_with_mock_repository(self):
+        from unittest.mock import MagicMock
+
         from app.evaluation import EvaluationAgent
         from app.schemas.evaluation import EvaluationAnswer, EvaluationSubmission
 
-        agent = EvaluationAgent(None, enable_llm=True)
+        # Build a quiz resource with answer key
+        quiz_content = json.dumps(
+            {
+                "questions": [
+                    {
+                        "id": "q1",
+                        "level": "basic",
+                        "type": "short_answer",
+                        "question": "什么是线性回归？",
+                        "answer": "线性回归是通过最小二乘法拟合一条直线，使样本点到直线距离平方和最小",
+                    }
+                ]
+            }
+        )
+        quiz_resource = Resource(
+            resource_id="res_001",
+            resource_type=ResourceType.QUIZ,
+            title="线性回归测验",
+            content=quiz_content,
+            content_format="json",
+            target_topic="线性回归",
+            difficulty=Difficulty.BEGINNER,
+            personalization_reason="test",
+            source_references=[SourceReference(source_id="s1", title="test", locator="http://example.com")],
+            review_status="approved",
+        )
+
+        mock_repo = MagicMock()
+        mock_repo.get_resource.return_value = quiz_resource
+        mock_db = MagicMock()
+        mock_db_ctx = MagicMock()
+        mock_db_ctx.__enter__.return_value = mock_db
+        mock_db_ctx.__exit__.return_value = False
+        mock_db.execute.return_value.fetchone.return_value = {"task_id": "task_001"}
+        mock_repo.database.connect.return_value = mock_db_ctx
+        mock_repo.get_task.return_value = MagicMock(student_id="s1")
+
+        agent = EvaluationAgent(repository=mock_repo)
         submission = EvaluationSubmission(
             student_id="s1",
             path_id="p1",
             step=1,
             answers=[
                 EvaluationAnswer(
-                    question_id="linear_regression_basic_01",
-                    response="线性回归通过最小二乘法拟合一条直线，使所有样本点到直线的距离平方和最小。" * 3,
+                    question_id="res_001::q1",
+                    response="线性回归通过最小二乘法拟合一条直线，使所有样本点到直线的距离平方和最小。",
                 )
             ],
             time_spent_minutes=10,
         )
-        result, profile_updates, path_updates = asyncio.run(agent.evaluate(submission))
+        result, profile_updates, path_updates = asyncio.run(
+            agent.evaluate(submission, expected_topic="线性回归")
+        )
         assert result.mastery_score is not None
         assert result.passed is not None
         assert isinstance(profile_updates, dict)
