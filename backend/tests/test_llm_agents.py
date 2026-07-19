@@ -17,7 +17,7 @@ from app.planner import PlannerAgent
 from app.planner.models import LearningPathDraft
 from app.profile import DevelopmentProfileAgent, ProfileAgent
 from app.profile.models import ProfileExtractionDraft
-from app.schemas import ProfileChatRequest, ResourceType
+from app.schemas import LearningPath, ProfileChatRequest, ResourceType
 from app.schemas.profile import ChatMessage
 
 from conftest import TEST_STUDENT_TEXT
@@ -560,7 +560,8 @@ def test_planner_invalid_response_falls_back(
     assert [step.step for step in path.steps] == list(range(1, len(path.steps) + 1))
     assert all(not step.topic.startswith("点：") for step in path.steps)
     assert len(fake.calls) == 2
-    assert "planner_llm_fallback" in caplog.text
+    assert "planner_fallback request_id=" in caplog.text
+    assert "mode=development_rule_based" in caplog.text
 
 
 def test_planner_repairs_one_invalid_structured_response() -> None:
@@ -594,6 +595,51 @@ def test_planner_repair_includes_pydantic_field_error() -> None:
     assert "steps.0.learning_goal: missing" in fake.calls[1]["system_prompt"]
 
 
+def test_planner_repairs_invalid_resource_enum_with_exact_constraints(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.planner.agent")
+    invalid = _path_draft()
+    invalid["steps"][0]["recommended_resources"] = ["explanation", "video"]
+    fake = FakeLLMClient([invalid, _path_draft()])
+
+    path = asyncio.run(
+        PlannerAgent(fake, enable_llm=True).generate(_development_profile())
+    )
+
+    repair_prompt = fake.calls[1]["system_prompt"]
+    assert path.generation_mode == "llm_structured"
+    assert len(fake.calls) == 2
+    assert "steps.0.recommended_resources.1: enum" in repair_prompt
+    assert 'value="video"' in repair_prompt
+    assert '["explanation","mind_map","quiz","reading","coding"]' in repair_prompt
+    assert "不得输出中文资源类型、旧枚举或别名" in repair_prompt
+    assert "planner_invalid_enum request_id=" in caplog.text
+    assert "field=steps.0.recommended_resources.1" in caplog.text
+    assert 'value="video"' in caplog.text
+    assert "attempt=2 success=true" in caplog.text
+
+
+def test_planner_second_invalid_resource_enum_falls_back_without_third_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.planner.agent")
+    invalid = _path_draft()
+    invalid["steps"][0]["recommended_resources"] = ["explanation", "unknown_type"]
+    fake = FakeLLMClient([invalid, invalid, _path_draft()])
+
+    path = asyncio.run(
+        PlannerAgent(fake, enable_llm=True).generate(_development_profile())
+    )
+
+    assert path.generation_mode == "development_rule_based"
+    assert len(fake.calls) == 2
+    assert LearningPath.model_validate(path.model_dump(mode="json")) == path
+    assert "attempt=2 success=false" in caplog.text
+    assert "planner_fallback request_id=" in caplog.text
+    assert "mode=development_rule_based" in caplog.text
+
+
 def test_private_planner_draft_normalizes_only_safe_formats() -> None:
     raw = _path_draft()
     raw["steps"][0].update(
@@ -617,6 +663,28 @@ def test_private_planner_draft_normalizes_only_safe_formats() -> None:
     assert draft.steps[0].prerequisites == []
     assert draft.steps[1].recommended_resources == [ResourceType.QUIZ]
     assert draft.total_estimated_minutes == 90
+
+
+def test_private_planner_draft_normalizes_explicit_resource_aliases() -> None:
+    raw = _path_draft()
+    raw["steps"][0]["recommended_resources"] = [" MINDMAP ", "课程讲解"]
+    raw["steps"][1]["recommended_resources"] = "代码实践案例"
+
+    draft = LearningPathDraft.model_validate(raw)
+
+    assert draft.steps[0].recommended_resources == [
+        ResourceType.MIND_MAP,
+        ResourceType.EXPLANATION,
+    ]
+    assert draft.steps[1].recommended_resources == [ResourceType.CODING]
+
+
+def test_private_planner_draft_rejects_unknown_resource_alias() -> None:
+    raw = _path_draft()
+    raw["steps"][0]["recommended_resources"] = ["explanation", "video"]
+
+    with pytest.raises(ValidationError):
+        LearningPathDraft.model_validate(raw)
 
 
 def test_private_planner_draft_does_not_invent_missing_core_content() -> None:

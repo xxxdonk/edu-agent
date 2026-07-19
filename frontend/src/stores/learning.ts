@@ -4,7 +4,7 @@ import {api} from '@/api/client';
 import {API_ENDPOINTS} from '@/api/config';
 import {connectTaskEvents} from '@/api/sse';
 import type {StreamConnectionStatus} from '@/api/sse';
-import {describeActualError, getApiErrorDetails, toUserMessage} from '@/utils/errors';
+import {describeActualError, getApiErrorDetails, isRequestTimeout, toUserMessage} from '@/utils/errors';
 import {parseQuiz} from '@/utils/content';
 import {buildTaskTimeline} from '@/utils/presentation';
 import type {
@@ -112,6 +112,10 @@ export const useLearningStore = defineStore('learning', () => {
   let closeStream: (() => void) | null = null;
   let pollingTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   let finalizingTask = false;
+  let profileGenerationEpoch = 0;
+  let activeProfileRequest: AbortController | null = null;
+  let pathGenerationEpoch = 0;
+  let activePathRequest: AbortController | null = null;
   let resourceGenerationEpoch = 0;
   let assistantAnimation: AssistantAnimationTask | null = null;
 
@@ -247,6 +251,10 @@ export const useLearningStore = defineStore('learning', () => {
 
   async function requestProfile() {
     if (profileStatus.value === 'loading') return;
+    const requestEpoch = ++profileGenerationEpoch;
+    activeProfileRequest?.abort();
+    const requestController = new AbortController();
+    activeProfileRequest = requestController;
     profileStatus.value = 'loading';
     notice.value = '';
     setTrace('profile_agent', 'running', '正在从自然语言中提取画像证据', 12);
@@ -257,7 +265,8 @@ export const useLearningStore = defineStore('learning', () => {
       evaluation_summary: null,
     };
     try {
-      const response = await api.chat(payload);
+      const response = await api.chat(payload, requestController.signal);
+      if (requestEpoch !== profileGenerationEpoch) return;
       previousProfile.value = profile.value;
       profile.value = response.profile;
       profileMeta.value = response;
@@ -266,20 +275,26 @@ export const useLearningStore = defineStore('learning', () => {
       setTrace('profile_agent', 'completed', `画像 v${response.profile.version} 已生成`, 20);
       const answer = response.next_question || '画像已更新。我将根据这些信息为你安排下一步学习路径。';
       await animateAssistant(answer);
+      if (requestEpoch !== profileGenerationEpoch) return;
       await generatePath();
     } catch (error) {
+      if (requestEpoch !== profileGenerationEpoch) return;
       profileStatus.value = 'error';
       notice.value = toUserMessage(error);
       setTrace('profile_agent', 'failed', notice.value, 0, notice.value);
       recordIssue(API_ENDPOINTS.profileChat, payload, '200 ProfileChatResponse，包含字段证据与置信度', error, [
         '在学习画像工作区输入学习情况', '点击发送', '观察画像与自然语言追问',
       ]);
+    } finally {
+      if (requestEpoch === profileGenerationEpoch && activeProfileRequest === requestController) {
+        activeProfileRequest = null;
+      }
     }
   }
 
   async function sendMessage(content: string) {
     const trimmed = content.trim();
-    if (!trimmed || profileStatus.value === 'loading') return;
+    if (!trimmed || profileStatus.value === 'loading' || pathStatus.value === 'loading') return;
     stopAssistantAnimation(true);
     messages.value.push({message_id: id('user'), role: 'user', content: trimmed});
     await requestProfile();
@@ -292,7 +307,11 @@ export const useLearningStore = defineStore('learning', () => {
 
   async function generatePath(evaluationSummary: string | null = null) {
     if (!profile.value || pathStatus.value === 'loading') return;
+    const requestEpoch = ++pathGenerationEpoch;
+    const requestController = new AbortController();
+    activePathRequest = requestController;
     pathStatus.value = 'loading';
+    notice.value = '';
     setTrace('planner_agent', 'running', '正在结合画像、薄弱点和时间预算规划路径', 24);
     const payload = {
       student_id: studentId.value,
@@ -301,19 +320,28 @@ export const useLearningStore = defineStore('learning', () => {
       evaluation_summary: evaluationSummary,
     };
     try {
-      const result = await api.generatePath(payload);
+      const result = await api.generatePath(payload, requestController.signal);
+      if (requestEpoch !== pathGenerationEpoch) return;
       if (path.value) previousPath.value = path.value;
       path.value = result;
       selectedStep.value = result.steps[0]?.step ?? 1;
       pathStatus.value = result.steps.length ? 'success' : 'empty';
+      notice.value = '';
       setTrace('planner_agent', 'completed', `已生成 ${result.steps.length} 个学习步骤`, 30);
     } catch (error) {
+      if (requestEpoch !== pathGenerationEpoch) return;
       pathStatus.value = 'error';
-      notice.value = toUserMessage(error);
+      notice.value = isRequestTimeout(error)
+        ? '路径规划等待时间较长，后台可能仍在完成格式修复。画像已保留，可稍后查看或安全重试。'
+        : toUserMessage(error);
       setTrace('planner_agent', 'failed', notice.value, 20, notice.value);
       recordIssue(API_ENDPOINTS.pathGenerate, payload, '200 { path: LearningPath }', error, [
         '完成画像对话', '等待自动生成学习路径', '观察路径工作区',
       ]);
+    } finally {
+      if (requestEpoch === pathGenerationEpoch && activePathRequest === requestController) {
+        activePathRequest = null;
+      }
     }
   }
 
@@ -544,6 +572,12 @@ export const useLearningStore = defineStore('learning', () => {
 
   function resetSession() {
     stopAssistantAnimation();
+    profileGenerationEpoch += 1;
+    activeProfileRequest?.abort();
+    activeProfileRequest = null;
+    pathGenerationEpoch += 1;
+    activePathRequest?.abort();
+    activePathRequest = null;
     resourceGenerationEpoch += 1;
     stopTaskMonitoring();
     studentId.value = `demo-student-${Date.now()}`;

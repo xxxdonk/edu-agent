@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.database import Repository
+from app.database.repositories import safe_student_reference
 from app.schemas import (
     EvaluationResult,
     EvaluationSubmission,
@@ -165,8 +166,8 @@ class EvaluationService:
         previous = self._repository.get_latest_profile(submission.student_id)
         if previous is None:
             logger.warning(
-                "profile_update_skipped: no existing profile for student_id=%s",
-                submission.student_id,
+                "profile_update_skipped: no existing profile for student_ref=%s",
+                safe_student_reference(submission.student_id),
             )
             return None
 
@@ -190,17 +191,21 @@ class EvaluationService:
             profile_response = await self._profile_agent.extract(
                 profile_request, previous
             )
-            self._repository.save_profile(profile_response.profile)
-            logger.info(
-                "profile_updated student_id=%s old_version=%d new_version=%d",
-                submission.student_id,
-                previous.version,
-                profile_response.profile.version,
-            )
-            return profile_response.profile
         except Exception as exc:
-            logger.error("profile_update_failed: %s", exc)
+            logger.error(
+                "profile_update_failed student_ref=%s stage=extract error_type=%s",
+                safe_student_reference(submission.student_id),
+                type(exc).__name__,
+            )
             return None
+        persisted_profile = self._repository.save_profile(profile_response.profile)
+        logger.info(
+            "profile_updated student_ref=%s old_version=%d new_version=%d",
+            safe_student_reference(submission.student_id),
+            previous.version,
+            persisted_profile.version,
+        )
+        return persisted_profile
 
     async def _trigger_path_update(
         self,
@@ -213,8 +218,8 @@ class EvaluationService:
         profile = self._repository.get_latest_profile(submission.student_id)
         if profile is None:
             logger.warning(
-                "path_update_skipped: no profile for student_id=%s",
-                submission.student_id,
+                "path_update_skipped: no profile for student_ref=%s",
+                safe_student_reference(submission.student_id),
             )
             return None
 
@@ -243,8 +248,8 @@ class EvaluationService:
                 )
             self._repository.save_path(new_path)
             logger.info(
-                "path_updated student_id=%s new_path_id=%s",
-                submission.student_id,
+                "path_updated student_ref=%s new_path_id=%s",
+                safe_student_reference(submission.student_id),
                 new_path.path_id,
             )
             return new_path

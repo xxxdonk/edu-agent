@@ -21,18 +21,23 @@ const http = axios.create({
   headers: {'Content-Type': 'application/json; charset=utf-8'},
 });
 
+export const PATH_GENERATION_TIMEOUT_MS = 270_000;
+
 export const api = {
   async health(): Promise<HealthResponse> {
     return (await http.get<HealthResponse>(API_ENDPOINTS.health)).data;
   },
-  async chat(payload: ProfileChatRequest): Promise<ProfileChatResponse> {
-    return (await http.post<ProfileChatResponse>(API_ENDPOINTS.profileChat, payload)).data;
+  async chat(payload: ProfileChatRequest, signal?: AbortSignal): Promise<ProfileChatResponse> {
+    return (await http.post<ProfileChatResponse>(API_ENDPOINTS.profileChat, payload, {signal})).data;
   },
   async profile(studentId: string): Promise<StudentProfile> {
     return (await http.get<StudentProfile>(API_ENDPOINTS.profile(studentId))).data;
   },
-  async generatePath(payload: PathGenerateRequest): Promise<LearningPath> {
-    return (await http.post<{path: LearningPath}>(API_ENDPOINTS.pathGenerate, payload)).data.path;
+  async generatePath(payload: PathGenerateRequest, signal?: AbortSignal): Promise<LearningPath> {
+    return (await http.post<{path: LearningPath}>(API_ENDPOINTS.pathGenerate, payload, {
+      signal,
+      timeout: PATH_GENERATION_TIMEOUT_MS,
+    })).data.path;
   },
   async generateResources(payload: ResourceGenerationRequest): Promise<TaskAcceptedResponse> {
     return (await http.post<TaskAcceptedResponse>(API_ENDPOINTS.resourcesGenerate, payload)).data;

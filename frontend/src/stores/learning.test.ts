@@ -204,6 +204,47 @@ describe('learning store profile chat', () => {
     });
   });
 
+  it('sends only one profile request while profile extraction is loading', async () => {
+    let resolveProfile!: (value: ProfileChatResponse) => void;
+    vi.mocked(api.chat).mockImplementation(() => new Promise((resolve) => {
+      resolveProfile = resolve;
+    }));
+    const store = useLearningStore();
+
+    const first = store.sendMessage('第一次画像请求');
+    await flushMicrotasks();
+    const duplicate = store.sendMessage('加载期间不应重复发送');
+
+    expect(api.chat).toHaveBeenCalledTimes(1);
+    expect(store.profileStatus).toBe('loading');
+    resolveProfile(profileResponse(1, '画像已完成。'));
+    await flushMicrotasks();
+    await vi.runAllTimersAsync();
+    await Promise.all([first, duplicate]);
+
+    expect(store.profileStatus).toBe('success');
+  });
+
+  it('aborts and ignores an old profile result after the session changes', async () => {
+    let resolveOld!: (value: ProfileChatResponse) => void;
+    vi.mocked(api.chat).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveOld = resolve;
+    }));
+    const store = useLearningStore();
+
+    const oldRequest = store.sendMessage('即将被新会话替换的画像请求');
+    await flushMicrotasks();
+    const oldSignal = vi.mocked(api.chat).mock.calls[0][1];
+    store.resetSession();
+    resolveOld(profileResponse(13, '旧画像响应'));
+    await oldRequest;
+
+    expect(oldSignal?.aborted).toBe(true);
+    expect(store.profile).toBeNull();
+    expect(store.profileStatus).toBe('idle');
+    expect(api.generatePath).not.toHaveBeenCalled();
+  });
+
   it('clears the active assistant timeout when the session resets', async () => {
     vi.mocked(api.chat).mockResolvedValueOnce(profileResponse(1, '请补充一个足够长的问题以保持动画计时器处于活动状态。'));
     const store = useLearningStore();
@@ -246,6 +287,99 @@ describe('learning store profile chat', () => {
     expect(store.composerDraft).toBe(demoInput);
     expect(store.messages).toEqual(originalMessages);
     expect(api.chat).not.toHaveBeenCalled();
+  });
+
+  it('sends only one path request while planning and blocks profile submission', async () => {
+    let resolvePath!: (value: LearningPath) => void;
+    vi.mocked(api.generatePath).mockImplementation(() => new Promise((resolve) => {
+      resolvePath = resolve;
+    }));
+    const store = useLearningStore();
+    store.profile = profileResponse(1, '').profile;
+
+    const first = store.generatePath();
+    await flushMicrotasks();
+    const duplicate = store.generatePath();
+    await store.sendMessage('规划期间不应重复提交画像');
+
+    expect(api.generatePath).toHaveBeenCalledTimes(1);
+    expect(api.chat).not.toHaveBeenCalled();
+    expect(store.pathStatus).toBe('loading');
+
+    resolvePath(learningPath(1));
+    await Promise.all([first, duplicate]);
+    expect(store.pathStatus).toBe('success');
+  });
+
+  it('preserves the profile after timeout and allows one isolated retry', async () => {
+    const timeoutError = Object.assign(new Error('timeout'), {
+      isAxiosError: true,
+      code: 'ECONNABORTED',
+    });
+    let resolveRetry!: (value: LearningPath) => void;
+    vi.mocked(api.generatePath)
+      .mockRejectedValueOnce(timeoutError)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRetry = resolve;
+      }));
+    const store = useLearningStore();
+    const originalProfile = profileResponse(13, '').profile;
+    store.profile = originalProfile;
+
+    await store.generatePath();
+
+    expect(store.pathStatus).toBe('error');
+    expect(store.profile).toStrictEqual(originalProfile);
+    expect(store.notice).toContain('后台可能仍在完成格式修复');
+
+    const retry = store.generatePath();
+    const duplicateRetry = store.generatePath();
+    expect(api.generatePath).toHaveBeenCalledTimes(2);
+    resolveRetry(learningPath(13));
+    await Promise.all([retry, duplicateRetry]);
+
+    expect(store.pathStatus).toBe('success');
+    expect(store.notice).toBe('');
+  });
+
+  it('aborts and ignores an old path result after the session changes', async () => {
+    let resolveOld!: (value: LearningPath) => void;
+    const freshPath = {...learningPath(2), path_id: 'fresh-path'};
+    vi.mocked(api.generatePath)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOld = resolve;
+      }))
+      .mockResolvedValueOnce(freshPath);
+    const store = useLearningStore();
+    store.profile = profileResponse(1, '').profile;
+
+    const oldRequest = store.generatePath();
+    await flushMicrotasks();
+    const oldSignal = vi.mocked(api.generatePath).mock.calls[0][1];
+    store.resetSession();
+    expect(oldSignal?.aborted).toBe(true);
+
+    store.profile = profileResponse(2, '').profile;
+    await store.generatePath();
+    resolveOld({...learningPath(1), path_id: 'stale-path'});
+    await oldRequest;
+
+    expect(store.path?.path_id).toBe('fresh-path');
+    expect(store.pathStatus).toBe('success');
+  });
+
+  it('keeps the explicit development fallback mode returned by Planner', async () => {
+    vi.mocked(api.generatePath).mockResolvedValue({
+      ...learningPath(1),
+      generation_mode: 'development_rule_based',
+    });
+    const store = useLearningStore();
+    store.profile = profileResponse(1, '').profile;
+
+    await store.generatePath();
+
+    expect(store.path?.generation_mode).toBe('development_rule_based');
+    expect(store.developmentMode).toBe(true);
   });
 
   it('enables and exits demo mode as refresh-local UI state', () => {

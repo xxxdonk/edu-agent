@@ -10,12 +10,35 @@ from app.schemas.common import ApiModel, ResourceType
 
 
 _TOPIC_PREFIX = re.compile(r"^(?:(?:知识点|点|主题)\s*[:：]\s*)+")
+PLANNER_RESOURCE_TYPE_VALUES = tuple(item.value for item in ResourceType)
+_RESOURCE_TYPE_ALIASES = {
+    "mindmap": ResourceType.MIND_MAP.value,
+    "mind-map": ResourceType.MIND_MAP.value,
+    "课程讲解": ResourceType.EXPLANATION.value,
+    "讲解文档": ResourceType.EXPLANATION.value,
+    "思维导图": ResourceType.MIND_MAP.value,
+    "分层练习": ResourceType.QUIZ.value,
+    "分层练习题": ResourceType.QUIZ.value,
+    "拓展阅读": ResourceType.READING.value,
+    "代码实践": ResourceType.CODING.value,
+    "代码实践案例": ResourceType.CODING.value,
+}
 
 
 def _clean_topic_label(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     return _TOPIC_PREFIX.sub("", value.strip()).strip()
+
+
+def _normalize_resource_type(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    normalized = stripped.casefold()
+    if normalized in PLANNER_RESOURCE_TYPE_VALUES:
+        return normalized
+    return _RESOURCE_TYPE_ALIASES.get(normalized, stripped)
 
 
 class LearningPathStepDraft(ApiModel):
@@ -62,7 +85,11 @@ class LearningPathDraft(ApiModel):
 
                 resources = raw_step.get("recommended_resources")
                 if isinstance(resources, str):
-                    raw_step["recommended_resources"] = [resources.strip()]
+                    resources = [resources]
+                if isinstance(resources, list):
+                    raw_step["recommended_resources"] = [
+                        _normalize_resource_type(item) for item in resources
+                    ]
 
                 minutes = raw_step.get("estimated_minutes")
                 if isinstance(minutes, str) and minutes.strip().isdigit():

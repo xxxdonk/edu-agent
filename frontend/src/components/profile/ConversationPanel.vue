@@ -62,8 +62,8 @@
         type="primary"
         :icon="Promotion"
         :loading="store.profileStatus === 'loading'"
-        :disabled="!store.composerDraft.trim()"
-        :title="store.composerDraft.trim() ? '发送学习情况（Ctrl+Enter）' : '请先输入学习情况'"
+        :disabled="submissionLocked || !store.composerDraft.trim()"
+        :title="submissionLocked ? '正在生成画像或学习路径，请等待当前请求完成' : (store.composerDraft.trim() ? '发送学习情况（Ctrl+Enter）' : '请先输入学习情况')"
         @click="submit"
       >
         发送
@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import {nextTick, onBeforeUnmount, ref, watch} from 'vue';
+import {computed, nextTick, onBeforeUnmount, ref, watch} from 'vue';
 import {ElMessage, ElMessageBox} from 'element-plus';
 import {Loading, Promotion} from '@element-plus/icons-vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
@@ -83,6 +83,9 @@ import {needsDemoCaseConfirmation} from '@/utils/presentation';
 
 const store = useLearningStore();
 const scrollArea = ref<HTMLElement | null>(null);
+const submissionLocked = computed(() => (
+  store.profileStatus === 'loading' || store.pathStatus === 'loading'
+));
 const suggestions = [
   '我该从哪里开始学机器学习？',
   '我每天只有45分钟，喜欢边写代码边学。',
@@ -90,6 +93,7 @@ const suggestions = [
 ];
 
 async function submit() {
+  if (submissionLocked.value) return;
   const content = store.composerDraft;
   store.composerDraft = '';
   await store.sendMessage(content);

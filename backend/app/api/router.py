@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field
 
+from app.database.repositories import safe_student_reference
 from app.evaluation.evaluator import (
     EvaluationAgent,
     EvaluationQuestionNotFoundError,
@@ -96,8 +97,8 @@ async def profile_chat(payload: ProfileChatRequest, request: Request) -> Profile
     repository = request.app.state.repository
     previous = repository.get_latest_profile(payload.student_id)
     response = await request.app.state.profile_agent.extract(payload, previous)
-    repository.save_profile(response.profile)
-    return response
+    persisted_profile = repository.save_profile(response.profile)
+    return response.model_copy(update={"profile": persisted_profile})
 
 
 @router.get(
@@ -355,8 +356,7 @@ async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> 
             profile_request,
             previous_profile,
         )
-        updated_profile = profile_response.profile
-        repository.save_profile(updated_profile)
+        updated_profile = repository.save_profile(profile_response.profile)
         profile_updates.update(
             {
                 "updated_profile_version": updated_profile.version,
@@ -385,8 +385,8 @@ async def submit_evaluation(payload: EvaluationSubmission, request: Request) -> 
             }
         )
         logger.info(
-            "evaluation_closed_loop student_id=%s profile_version=%s path_replanned=%s",
-            payload.student_id,
+            "evaluation_closed_loop student_ref=%s profile_version=%s path_replanned=%s",
+            safe_student_reference(payload.student_id),
             updated_profile.version,
             True,
         )

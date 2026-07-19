@@ -17,7 +17,11 @@ from app.llm import (
 from app.llm.errors import safe_error_summary
 from app.schemas import LearningPath, LearningPathStep, ResourceType, StudentProfile
 from app.schemas.common import Difficulty, utc_now
-from .models import LearningPathDraft, _clean_topic_label
+from .models import (
+    LearningPathDraft,
+    PLANNER_RESOURCE_TYPE_VALUES,
+    _clean_topic_label,
+)
 from .prompts import PLANNER_SYSTEM_PROMPT, planner_format_repair_prompt
 
 logger = logging.getLogger(__name__)
@@ -174,19 +178,34 @@ class PlannerAgent:
         evaluation_summary: str | None = None,
         target_topics: list[str] | None = None,
     ) -> LearningPath:
+        request_id = uuid4().hex[:12]
         fallback_path_id = previous_path.path_id if previous_path else previous_path_id
+        logger.info(
+            "planner_request_started request_id=%s profile_version=%s replan=%s",
+            request_id,
+            profile.version,
+            bool(previous_path or evaluation_summary),
+        )
         if not self._enable_llm or self._llm_client is None:
-            return self._fallback.generate(
+            path = self._fallback.generate(
                 profile,
                 previous_path_id=fallback_path_id,
                 evaluation_summary=evaluation_summary,
             )
+            logger.info(
+                "planner_request_completed request_id=%s mode=%s reason=%s",
+                request_id,
+                path.generation_mode,
+                "llm_disabled" if not self._enable_llm else "llm_client_unavailable",
+            )
+            return path
         try:
             draft = await self._generate_validated_draft(
                 profile,
                 previous_path,
                 evaluation_summary,
                 target_topics,
+                request_id,
             )
             adjustment_reason = draft.adjustment_reason
             if not adjustment_reason and (previous_path or evaluation_summary):
@@ -195,7 +214,7 @@ class PlannerAgent:
                     if evaluation_summary
                     else f"基于旧路径 {previous_path.path_id} 重新规划"
                 )
-            return LearningPath(
+            path = LearningPath(
                 path_id=str(uuid4()),
                 student_id=profile.student_id,
                 profile_version=profile.version,
@@ -208,13 +227,29 @@ class PlannerAgent:
                 generation_mode="llm_structured",
                 created_at=utc_now(),
             )
+            logger.info(
+                "planner_request_completed request_id=%s mode=%s",
+                request_id,
+                path.generation_mode,
+            )
+            return path
         except (LLMError, ValidationError, ValueError) as error:
-            logger.warning("planner_llm_fallback error=%s", safe_error_summary(error))
-            return self._fallback.generate(
+            logger.warning(
+                "planner_fallback request_id=%s mode=development_rule_based error=%s",
+                request_id,
+                safe_error_summary(error),
+            )
+            path = self._fallback.generate(
                 profile,
                 previous_path_id=fallback_path_id,
                 evaluation_summary=evaluation_summary,
             )
+            logger.info(
+                "planner_request_completed request_id=%s mode=%s",
+                request_id,
+                path.generation_mode,
+            )
+            return path
 
     async def _generate_validated_draft(
         self,
@@ -222,6 +257,7 @@ class PlannerAgent:
         previous_path: LearningPath | None,
         evaluation_summary: str | None,
         target_topics: list[str] | None,
+        request_id: str,
     ) -> LearningPathDraft:
         prompt_payload = self._prompt_payload(
             profile,
@@ -244,18 +280,28 @@ class PlannerAgent:
                 )
                 self._validate_draft(draft, profile)
                 if attempt:
-                    logger.info("planner_format_repair success=true")
+                    logger.info(
+                        "planner_format_repair request_id=%s attempt=2 success=true",
+                        request_id,
+                    )
                 return draft
             except (
                 LLMResponseFormatError,
                 LLMValidationError,
                 ValidationError,
             ) as error:
-                if attempt:
-                    raise
                 repair_error_summary = self._validation_error_summary(error)
+                self._log_invalid_resource_enums(error, request_id, attempt + 1)
+                if attempt:
+                    logger.warning(
+                        "planner_format_repair request_id=%s attempt=2 success=false error=%s",
+                        request_id,
+                        repair_error_summary,
+                    )
+                    raise
                 logger.warning(
-                    "planner_format_repair requested=true error=%s",
+                    "planner_format_repair request_id=%s attempt=1 requested=true error=%s",
+                    request_id,
                     repair_error_summary,
                 )
         raise LLMValidationError("planner format repair exhausted")
@@ -329,19 +375,69 @@ class PlannerAgent:
 
     @staticmethod
     def _validation_error_summary(error: BaseException) -> str:
-        validation_error: ValidationError | None = None
-        if isinstance(error, ValidationError):
-            validation_error = error
-        elif isinstance(error.__cause__, ValidationError):
-            validation_error = error.__cause__
+        validation_error = PlannerAgent._extract_validation_error(error)
         if validation_error is None:
             return safe_error_summary(error)
 
         details: list[str] = []
         for item in validation_error.errors(include_url=False)[:4]:
             location = ".".join(str(part) for part in item.get("loc", ())) or "root"
-            details.append(f"{location}: {item.get('type', 'validation_error')}")
+            error_type = item.get("type", "validation_error")
+            detail = f"{location}: {error_type}"
+            if error_type == "enum" and "recommended_resources" in location:
+                detail += (
+                    f" value={json.dumps(PlannerAgent._safe_enum_value(item.get('input')), ensure_ascii=False)}"
+                    f" allowed={PlannerAgent._resource_types_json()}"
+                )
+            details.append(detail)
         return "pydantic_validation_error: " + "; ".join(details)
+
+    @staticmethod
+    def _extract_validation_error(error: BaseException) -> ValidationError | None:
+        if isinstance(error, ValidationError):
+            return error
+        if isinstance(error.__cause__, ValidationError):
+            return error.__cause__
+        return None
+
+    @staticmethod
+    def _safe_enum_value(value: object) -> str:
+        if not isinstance(value, str):
+            return f"<{type(value).__name__}>"
+        return re.sub(r"\s+", " ", value.strip())[:64] or "<empty>"
+
+    @staticmethod
+    def _resource_types_json() -> str:
+        return json.dumps(
+            list(PLANNER_RESOURCE_TYPE_VALUES),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _log_invalid_resource_enums(
+        error: BaseException,
+        request_id: str,
+        attempt: int,
+    ) -> None:
+        validation_error = PlannerAgent._extract_validation_error(error)
+        if validation_error is None:
+            return
+        for item in validation_error.errors(include_url=False):
+            location = ".".join(str(part) for part in item.get("loc", ())) or "root"
+            if item.get("type") != "enum" or "recommended_resources" not in location:
+                continue
+            logger.warning(
+                "planner_invalid_enum request_id=%s attempt=%s field=%s value=%s allowed=%s",
+                request_id,
+                attempt,
+                location,
+                json.dumps(
+                    PlannerAgent._safe_enum_value(item.get("input")),
+                    ensure_ascii=False,
+                ),
+                PlannerAgent._resource_types_json(),
+            )
 
     @staticmethod
     def _compact_previous_path(path: LearningPath) -> dict[str, object]:
