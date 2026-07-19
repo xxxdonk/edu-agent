@@ -217,6 +217,8 @@ button:focus-visible, [role="button"]:focus-visible, a:focus-visible, .el-input_
 .code-block, .json-preview { max-width: 100%; margin: 0; overflow: auto; white-space: pre; line-height: 1.55; }
 .mermaid-host { min-height: 300px; display: grid; place-items: center; white-space: pre-wrap; }
 .mermaid-host svg { max-width: 100%; height: auto; }
+.mermaid-render-sandbox { position: fixed; top: 0; left: -10000px; width: 1000px; visibility: hidden; pointer-events: none; }
+.mermaid-source-fallback { max-height: 320px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); }
 
 .quiz-list { display: grid; gap: 12px; }
 .quiz-question { display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }

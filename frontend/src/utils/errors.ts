@@ -15,6 +15,10 @@ export function getApiErrorDetails(error: unknown): Record<string, unknown> {
   return error.response?.data?.error?.details ?? {};
 }
 
+export function isRequestTimeout(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.code === 'ECONNABORTED';
+}
+
 export function toUserMessage(error: unknown): string {
   if (axios.isAxiosError<ApiErrorBody>(error)) {
     if (error.code === 'ECONNABORTED') return '请求等待时间过长，请确认后端正在运行后重试。';

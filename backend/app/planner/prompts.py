@@ -1,3 +1,8 @@
+import json
+
+from .models import PLANNER_RESOURCE_TYPE_VALUES
+
+
 PLANNER_JSON_STRUCTURE = """{
   "steps": [
     {
@@ -15,6 +20,12 @@ PLANNER_JSON_STRUCTURE = """{
   "adjustment_reason": null
 }"""
 
+PLANNER_RESOURCE_ENUM_JSON = json.dumps(
+    list(PLANNER_RESOURCE_TYPE_VALUES),
+    ensure_ascii=False,
+    separators=(",", ":"),
+)
+
 
 PLANNER_SYSTEM_PROMPT = """
 你是 EduAgent 的个性化学习路径规划智能体。请根据学生画像、课程标识、旧路径、可选评价摘要和可选目标主题输出结构化路径草稿。
@@ -31,8 +42,12 @@ PLANNER_SYSTEM_PROMPT = """
 8. 不得生成逻辑矛盾步骤，也不得用专业刻板印象推断学生能力。
 9. 存在旧路径或评价摘要时必须填写 adjustment_reason，否则可以为 null。
 10. 只输出一个 JSON 对象，不得输出 Markdown 围栏、解释、标题或额外字段。
-11. recommended_resources 只能使用 explanation、mind_map、quiz、reading、coding。
+11. recommended_resources 只能包含以下唯一允许值：{resource_enum}。不得输出中文展示名、旧枚举或别名。
 """.strip()
+
+PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT.format(
+    resource_enum=PLANNER_RESOURCE_ENUM_JSON
+)
 
 PLANNER_SYSTEM_PROMPT += (
     "\n12. constraints.priority_topics contains evidence-backed weak topics in "
@@ -49,6 +64,9 @@ def planner_format_repair_prompt(error_summary: str) -> str:
         f"{PLANNER_SYSTEM_PROMPT}\n\n"
         "FORMAT REPAIR（仅允许一次）：上一份输出未通过结构校验。\n"
         f"原错误摘要：{error_summary}\n"
+        f"recommended_resources 唯一允许值：{PLANNER_RESOURCE_ENUM_JSON}。\n"
+        "错误摘要中的字段路径、校验类型和非法值必须逐项修正；"
+        "不得输出中文资源类型、旧枚举或别名。\n"
         "只修正 JSON 表示、字段类型、编号和约束，不改变输入要求的主题范围、"
         "学习目标或路径语义，不补造缺失的核心学习内容。"
         "仅返回修复后的完整 JSON 对象，不得输出 Markdown 或解释。\n"
