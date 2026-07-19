@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import json
 import logging
 import re
@@ -36,6 +37,7 @@ class ReviewerAgent:
         self._check_mermaid_validity(resource, issues)
         self._check_code_executability(resource, issues)
         self._check_quiz_consistency(resource, issues)
+        self._check_resource_quality(resource, issues)
 
         # Guardrail 检查
         guardrail_ok, guardrail_issues = GuardrailChecker.check(resource)
@@ -143,7 +145,10 @@ class ReviewerAgent:
         )
         matched = [pattern for pattern in placeholder_patterns if pattern in resource.content]
         lowered = resource.content.casefold()
-        if re.search(r"\b(?:todo|tbd|fixme)\b", lowered):
+        if (
+            resource.resource_type != ResourceType.CODING
+            and re.search(r"\b(?:todo|tbd|fixme)\b", lowered)
+        ):
             matched.append("TODO/TBD/FIXME")
         if matched:
             issues.append(f"内容包含占位符：{'、'.join(dict.fromkeys(matched))}")
@@ -273,6 +278,10 @@ class ReviewerAgent:
             if not isinstance(questions, list) or not questions:
                 issues.append("Quiz JSON 缺少非空 questions 数组")
                 return
+            if not 8 <= len(questions) <= 12:
+                issues.append("Quiz 题目数量应为 8 至 12 题")
+            normalized_questions: set[str] = set()
+            levels: set[str] = set()
             for index, question in enumerate(questions, start=1):
                 if not isinstance(question, dict):
                     issues.append(f"Quiz 第 {index} 题不是对象")
@@ -286,6 +295,13 @@ class ReviewerAgent:
                     issues.append(
                         f"Quiz 第 {index} 题缺少必要字段：{'、'.join(missing)}"
                     )
+                normalized = re.sub(
+                    r"[\W_]+", "", str(question.get("question", "")).casefold()
+                )
+                if normalized in normalized_questions:
+                    issues.append(f"Quiz 第 {index} 题与前面题目重复")
+                normalized_questions.add(normalized)
+                levels.add(str(question.get("level", "")).strip())
                 if question.get("type") == "single_choice":
                     options = question.get("options")
                     if not isinstance(options, list) or len(options) < 2:
@@ -299,6 +315,10 @@ class ReviewerAgent:
                         }
                         if answer and answer not in option_labels:
                             issues.append(f"Quiz 第 {index} 题答案不在选项中")
+                        if len({str(option).strip() for option in options}) != len(options):
+                            issues.append(f"Quiz 第 {index} 题存在重复选项")
+            if not {"basic", "intermediate", "advanced"} <= levels:
+                issues.append("Quiz 未完整覆盖基础、进阶和挑战三个层次")
             return
 
         content_lower = content.lower()
@@ -313,6 +333,88 @@ class ReviewerAgent:
         missing = [k for k, v in checks.items() if not v]
         if missing:
             issues.append(f"Quiz 内容缺少必要字段：{'、'.join(missing)}")
+
+    @classmethod
+    def _check_resource_quality(cls, resource: Resource, issues: list[str]) -> None:
+        if resource.resource_type == ResourceType.EXPLANATION:
+            cls._check_explanation_quality(resource, issues)
+        elif resource.resource_type == ResourceType.MIND_MAP:
+            cls._check_mind_map_quality(resource, issues)
+        elif resource.resource_type == ResourceType.READING:
+            cls._check_reading_quality(resource, issues)
+        elif resource.resource_type == ResourceType.CODING:
+            cls._check_coding_quality(resource, issues)
+
+    @staticmethod
+    def _missing_sections(content: str, labels: tuple[str, ...]) -> list[str]:
+        return [label for label in labels if label not in content]
+
+    @classmethod
+    def _check_explanation_quality(
+        cls, resource: Resource, issues: list[str]
+    ) -> None:
+        required = (
+            "学习目标", "为什么需要学习", "前置知识", "核心概念", "原理与公式",
+            "分步", "完整示例", "常见错误", "快速自检", "FAQ", "本节总结", "下一步",
+        )
+        missing = cls._missing_sections(resource.content, required)
+        if missing:
+            issues.append(f"课程讲解缺少结构：{'、'.join(missing)}")
+        if resource.content.count("**Q") < 5:
+            issues.append("课程讲解 FAQ 少于 5 组")
+        if resource.content.count("常见错误") < 1 or len(
+            re.findall(r"^\d+\. \*\*", resource.content, re.MULTILINE)
+        ) < 4:
+            issues.append("课程讲解常见错误不足 4 条")
+        for opening, closing in ((r"\(", r"\)"), (r"\[", r"\]")):
+            if resource.content.count(opening) != resource.content.count(closing):
+                issues.append("课程讲解 LaTeX 定界符未闭合")
+                break
+
+    @staticmethod
+    def _check_mind_map_quality(resource: Resource, issues: list[str]) -> None:
+        lines = [
+            line for line in resource.content.splitlines()
+            if line.strip() and line.strip() != "mindmap" and not line.lstrip().startswith("%%")
+        ]
+        if not 12 <= len(lines) <= 24:
+            issues.append("思维导图节点数量应为 12 至 24 个")
+        if any((len(line) - len(line.lstrip(" "))) // 2 > 4 for line in lines):
+            issues.append("思维导图层级超过 4 层")
+        dangerous = re.compile(r"[\"'`:\\]|<[^>]+>")
+        if any(dangerous.search(line.strip()) for line in lines):
+            issues.append("思维导图节点包含复杂或危险文本")
+
+    @classmethod
+    def _check_reading_quality(cls, resource: Resource, issues: list[str]) -> None:
+        required = (
+            "阅读目标", "10 分钟快速阅读", "深入阅读", "项目阅读路线",
+            "关键术语表", "阅读检查问题", "推荐实践", "真实 RAG 来源",
+        )
+        missing = cls._missing_sections(resource.content, required)
+        if missing:
+            issues.append(f"拓展阅读缺少结构：{'、'.join(missing)}")
+        glossary_section = resource.content.partition("关键术语表")[2].partition("阅读检查问题")[0]
+        if glossary_section.count("\n-") < 8:
+            issues.append("拓展阅读术语少于 8 个")
+
+    @classmethod
+    def _check_coding_quality(cls, resource: Resource, issues: list[str]) -> None:
+        required = (
+            "实验目标", "环境说明", "输入数据", "分步骤任务", "完整 Python 代码",
+            "预期输出", "TODO 练习", "调试提示", "进阶挑战", "反思问题",
+        )
+        missing = cls._missing_sections(resource.content, required)
+        if missing:
+            issues.append(f"代码实践缺少结构：{'、'.join(missing)}")
+        if "```python" not in resource.content or resource.content.count("```") < 2:
+            issues.append("代码实践缺少完整 Python 代码块")
+        dangerous = re.compile(
+            r"\b(?:os\.system|subprocess|eval|exec)\s*\(|"
+            r"\b(?:remove|unlink|rmtree)\s*\(|(?:[A-Za-z]:\\|/home/|/Users/)"
+        )
+        if dangerous.search(resource.content):
+            issues.append("代码实践包含危险命令或绝对路径")
 
     # ========== 评分计算 ==========
 
@@ -437,3 +539,20 @@ class ReviewerAgent:
             lines.append(f"{i}. **{issue}**\n")
         lines.append(f"\n---\n\n{resource.content[:500]}{'...' if len(resource.content) > 500 else ''}")
         return "".join(lines)
+
+    @staticmethod
+    def content_similarity(left: str, right: str) -> float:
+        """Return a lightweight normalized similarity score without NLP dependencies."""
+
+        def normalize(value: str) -> str:
+            value = re.sub(r"```[\s\S]*?```", "", value)
+            value = re.sub(r"^#{1,6}\s+.*$", "", value, flags=re.MULTILINE)
+            return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+
+        normalized_left = normalize(left)
+        normalized_right = normalize(right)
+        if not normalized_left or not normalized_right:
+            return 0.0
+        return difflib.SequenceMatcher(
+            None, normalized_left, normalized_right, autojunk=False
+        ).ratio()

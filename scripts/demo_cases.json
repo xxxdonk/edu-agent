@@ -3,12 +3,12 @@
     {
       "id": "visual_beginner",
       "name": "A. 初学视觉型学生",
-      "input": "我是计算机科学专业大一学生，刚开始学习机器学习，线性代数基础和梯度下降都很薄弱，希望看懂基础分类模型。每天可以学习30分钟，偏好图示、思维导图和生活类比。",
+      "input": "我是计算机科学专业大一学生，刚开始学习机器学习，线性代数基础和梯度下降都很薄弱，希望看懂基础分类模型。每天可以学习45分钟，偏好图示、思维导图和生活类比。",
       "expected_profile": {
         "major_any": ["计算机"],
         "course_any": ["机器学习"],
         "knowledge_level": ["beginner"],
-        "time_budget_minutes": 30,
+        "time_budget_minutes": 45,
         "goal_any": ["分类"],
         "weak_topic_groups": [["线性代数", "数学基础"], ["梯度下降"]],
         "preference_any": ["思维导图", "图示", "visual"]

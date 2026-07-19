@@ -3,12 +3,16 @@ import {fileURLToPath} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import {
   buildLearningPlanMarkdown,
+  buildResourcePackageSummary,
   buildTaskTimeline,
   evaluationChangeSummary,
   fallbackLabel,
   needsDemoCaseConfirmation,
+  profilePersonalizationEvidence,
+  resourceFollowUpSuggestions,
   safeFailureMessage,
   shouldExitDemoMode,
+  unansweredQuizCount,
 } from './presentation';
 import type {EvaluationResult, LearningPath, ProfileField, Resource, StudentProfile, TaskEvent, TaskState, UiAgentTrace} from '@/types/api';
 
@@ -97,6 +101,49 @@ describe('task progress presentation', () => {
 });
 
 describe('demo and evaluation presentation', () => {
+  it('builds a safe resource package summary in the required learning order', () => {
+    const resources = ['explanation', 'mind_map', 'reading', 'coding', 'quiz'].map((resourceType, index) => ({
+      resource_id: `resource-${index}`, resource_type: resourceType, title: `资源 ${index}`, content: 'content',
+      content_format: resourceType === 'quiz' ? 'json' : resourceType === 'mind_map' ? 'mermaid' : resourceType === 'coding' ? 'python' : 'markdown',
+      target_topic: '逻辑回归', difficulty: 'intermediate', personalization_reason: '根据项目目标生成',
+      source_references: [{source_id: index < 2 ? 'shared' : `source-${index}`, title: '课程资料', locator: `chapter-${index}`, chunk_id: null}],
+      review_status: index === 4 ? 'needs_revision' : 'approved', created_at: '2026-07-19T00:00:00Z',
+    })) as Resource[];
+    const summary = buildResourcePackageSummary(resources, path('p1', ['逻辑回归']), 1, null, evaluation());
+
+    expect(summary.completed).toBe(5);
+    expect(summary.missingLabels).toEqual([]);
+    expect(summary.recommendedOrder).toEqual(['课程讲解', '思维导图', '拓展阅读', '代码实践', '分层练习', '提交 Evaluation']);
+    expect(summary.estimatedMinutes).toBe(45);
+    expect(summary.approvedCount).toBe(4);
+    expect(summary.evaluationLabel).toContain('65 分');
+  });
+
+  it('reports missing resources for partial_success without guessing time', () => {
+    const partialTask: TaskState = {...task('partial_success'), requested_resource_types: ['explanation', 'quiz']};
+    const summary = buildResourcePackageSummary([], null, 1, partialTask, null);
+    expect(summary.partial).toBe(true);
+    expect(summary.missingLabels).toHaveLength(5);
+    expect(summary.estimatedMinutes).toBeNull();
+  });
+
+  it('derives visible personalization evidence only from current profile fields', () => {
+    const evidence = profilePersonalizationEvidence(profile(2, ['模型评估']));
+    expect(evidence).toContain('依据你的目标：完成分类项目');
+    expect(evidence).toContain('依据你的薄弱点：模型评估');
+    expect(evidence).toContain('依据你的时间预算：每天 60 分钟');
+    expect(profilePersonalizationEvidence(null)).toEqual([]);
+  });
+
+  it('provides resource-specific follow-ups without sending anything', () => {
+    expect(resourceFollowUpSuggestions('coding')).toContain('如何用于客户流失项目');
+    expect(resourceFollowUpSuggestions('mind_map')).toHaveLength(3);
+  });
+
+  it('counts unanswered quiz items while preserving existing answers', () => {
+    expect(unansweredQuizCount(['q1', 'q2', 'q3'], {q1: 'A', q2: '  '})).toBe(2);
+  });
+
   it('requires confirmation before replacing a populated draft or appending to an existing conversation', () => {
     expect(needsDemoCaseConfirmation('', false)).toBe(false);
     expect(needsDemoCaseConfirmation('已有输入', false)).toBe(true);

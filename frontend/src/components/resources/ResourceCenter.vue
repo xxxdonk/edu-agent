@@ -13,6 +13,32 @@
         {{ resources.length ? '重试生成' : '生成五类资源' }}
       </el-button>
     </div>
+    <section class="resource-package" aria-labelledby="resource-package-title">
+      <div class="resource-package__heading">
+        <div><p class="section-kicker">学习闭环</p><h3 id="resource-package-title">本次学习资源包</h3></div>
+        <el-tag :type="packageSummary.partial ? 'warning' : (packageSummary.completed === 5 ? 'success' : 'info')" effect="plain">
+          {{ packageSummary.completed }}/5 类可用
+        </el-tag>
+      </div>
+      <dl class="resource-package__facts">
+        <div><dt>学习主题</dt><dd>{{ packageSummary.topic }}</dd></div>
+        <div><dt>当前难度</dt><dd>{{ packageDifficulty }}</dd></div>
+        <div><dt>RAG 来源</dt><dd>{{ packageSummary.sourceCount }} 项</dd></div>
+        <div><dt>Reviewer</dt><dd>{{ packageSummary.approvedCount }}/{{ resources.length }} 项通过</dd></div>
+        <div><dt>Evaluation</dt><dd>{{ packageSummary.evaluationLabel }}</dd></div>
+        <div v-if="packageSummary.estimatedMinutes !== null"><dt>本步骤时间预算</dt><dd>{{ packageSummary.estimatedMinutes }} 分钟</dd></div>
+      </dl>
+      <div class="learning-sequence" aria-label="推荐学习顺序">
+        <span v-for="(label, index) in packageSummary.recommendedOrder" :key="label" :class="{'is-ready': index < packageSummary.completed}">
+          <b>{{ index + 1 }}</b>{{ label }}
+        </span>
+      </div>
+      <StatusBanner
+        v-if="packageSummary.partial"
+        status="partial"
+        :message="`资源包部分完成，暂缺：${packageSummary.missingLabels.join('、')}。已完成资源仍可继续学习。`"
+      />
+    </section>
     <StatusBanner v-if="status === 'loading'" status="loading" message="正在检索知识库并并行生成五类资源，随后逐项进入 Reviewer 审校" />
     <StatusBanner v-else-if="status === 'partial'" status="partial" message="任务部分完成：成功资源可继续使用，失败项可单独查看后整体重试。" action-label="重试失败项" @action="$emit('generate')" />
     <StatusBanner v-else-if="status === 'error'" status="error" message="本次没有获得可用资源，画像和路径均已保留。" action-label="重新生成" @action="$emit('generate')" />
@@ -60,8 +86,18 @@
           <div><dt>个性化原因</dt><dd>{{ selectedResource.personalization_reason }}</dd></div>
           <div><dt>内容来源</dt><dd>{{ selectedResource.source_references.length }} 项 · {{ formatSourceTitles(selectedResource.source_references) }}</dd></div>
           <div><dt>审校状态</dt><dd>{{ reviewLabel[selectedResource.review_status] }}</dd></div>
+          <div><dt>生成状态</dt><dd>已生成</dd></div>
           <div><dt>创建时间</dt><dd>{{ formatDate(selectedResource.created_at) }}</dd></div>
         </dl>
+        <section v-if="personalizationEvidence.length" class="personalization-evidence">
+          <h4>个性化依据</h4>
+          <ul><li v-for="item in personalizationEvidence" :key="item">{{ item }}</li></ul>
+        </section>
+        <StatusBanner
+          v-if="isDevelopmentFallback"
+          status="partial"
+          message="该资源由本地规则降级生成，已明确保留来源与 Reviewer 状态。"
+        />
         <el-collapse class="source-collapse">
           <el-collapse-item title="查看知识库来源与定位">
             <div v-for="source in selectedResource.source_references" :key="`${source.source_id}-${source.locator}`" class="source-row">
@@ -75,6 +111,18 @@
           message="该资源未通过 Reviewer 安全审校，内容已阻止展示，请重新生成。"
         />
         <ResourcePreview v-else :resource="selectedResource" />
+        <section v-if="selectedResource.review_status !== 'rejected'" class="resource-follow-ups">
+          <h4>学习追问建议</h4>
+          <div>
+            <el-button
+              v-for="suggestion in followUpSuggestions"
+              :key="suggestion"
+              size="small"
+              plain
+              @click="$emit('follow-up', suggestion)"
+            >{{ suggestion }}</el-button>
+          </div>
+        </section>
       </article>
     </div>
   </section>
@@ -85,16 +133,25 @@ import {computed, ref, watch} from 'vue';
 import {Collection, DataAnalysis, Document, MagicStick, Notebook, Tickets} from '@element-plus/icons-vue';
 import ResourcePreview from './ResourcePreview.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
-import type {Difficulty, Resource, ResourceType, ReviewStatus, ViewStatus} from '@/types/api';
+import type {Difficulty, EvaluationResult, LearningPath, Resource, ResourceType, ReviewStatus, StudentProfile, TaskState, ViewStatus} from '@/types/api';
 import {formatSourceTitles} from '@/utils/content';
-import {safeFailureMessage} from '@/utils/presentation';
+import {buildResourcePackageSummary, profilePersonalizationEvidence, resourceFollowUpSuggestions, safeFailureMessage} from '@/utils/presentation';
 
-const props = defineProps<{resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean; fallbackMode?: string | null}>();
-defineEmits<{(event: 'generate'): void}>();
+const props = defineProps<{
+  resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean;
+  fallbackMode?: string | null; profile: StudentProfile | null; path: LearningPath | null;
+  selectedStep: number; task: TaskState | null; evaluation: EvaluationResult | null;
+}>();
+defineEmits<{(event: 'generate'): void; (event: 'follow-up', suggestion: string): void}>();
 const selectedId = ref('');
-const order: ResourceType[] = ['explanation', 'mind_map', 'quiz', 'reading', 'coding'];
+const order: ResourceType[] = ['explanation', 'mind_map', 'reading', 'coding', 'quiz'];
 const sortedResources = computed(() => [...props.resources].sort((a, b) => order.indexOf(a.resource_type) - order.indexOf(b.resource_type)));
 const selectedResource = computed(() => sortedResources.value.find((item) => item.resource_id === selectedId.value) ?? sortedResources.value[0]);
+const packageSummary = computed(() => buildResourcePackageSummary(props.resources, props.path, props.selectedStep, props.task, props.evaluation));
+const packageDifficulty = computed(() => difficultyLabel[packageSummary.value.difficulty as Difficulty] ?? packageSummary.value.difficulty);
+const personalizationEvidence = computed(() => profilePersonalizationEvidence(props.profile));
+const followUpSuggestions = computed(() => selectedResource.value ? resourceFollowUpSuggestions(selectedResource.value.resource_type) : []);
+const isDevelopmentFallback = computed(() => selectedResource.value?.personalization_reason.toLowerCase().includes('development fallback') ?? false);
 watch(() => props.resources, (resources) => { if (!resources.some((item) => item.resource_id === selectedId.value)) selectedId.value = resources[0]?.resource_id ?? ''; }, {immediate: true});
 
 const typeLabel: Record<ResourceType, string> = {explanation: 'Markdown 课程讲解', mind_map: 'Mermaid 思维导图', quiz: '分层练习题', reading: '拓展阅读', coding: 'Python 代码实践'};

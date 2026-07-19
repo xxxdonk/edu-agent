@@ -22,10 +22,11 @@ class CodingAgent(BaseResourceAgent):
         references: list[SourceReference],
     ) -> Resource:
         system_prompt = (
-            "你是一位机器学习工程师。根据课程知识库，生成一份可运行的 Python 代码实践案例。"
-            "必须包含：完整可运行代码、详细注释、预期输出和使用说明。"
-            "难度与学生水平匹配，使用 sklearn / numpy 等常用库。"
-            "代码格式为 Python，用 Markdown 包裹代码块。"
+            "你是一位机器学习工程师。只依据课程知识库生成可独立运行的 Python 小实验。"
+            "必须包含实验目标、现有 Python 环境、输入数据、3 至 6 个步骤、完整代码、"
+            "预期输出、至少 3 个 TODO 练习、4 个调试提示、2 个进阶挑战和 3 个反思问题。"
+            "优先围绕学生项目目标；只使用 Python 标准库，不访问外网、不安装依赖，"
+            "不使用绝对路径、密钥、危险系统命令或删除操作，不虚构真实模型准确率。"
         )
         user_content = (
             f"主题：{topic}\n"
@@ -37,12 +38,14 @@ class CodingAgent(BaseResourceAgent):
             user_content += f"知识库参考：\n{rag_context}\n"
         user_content += "请生成一份完整的 Python 代码实践案例。"
 
-        draft = await self._llm_client.generate_structured(
+        return await self._generate_with_one_format_repair(
             system_prompt=system_prompt,
             messages=[LLMMessage(role="user", content=user_content)],
             response_model=Resource,
+            finalize=lambda draft: self._finalize(
+                draft, topic, difficulty, references, context
+            ),
         )
-        return self._finalize(draft, topic, difficulty, references, context)
 
     def _generate_heuristic(
         self,
@@ -56,71 +59,92 @@ class CodingAgent(BaseResourceAgent):
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
 
-        class_name = "GradientDescentClassifier"
+        goals = "、".join(context.profile.learning_goals.value or ["完成分类实验"])
+        weak = "、".join(context.profile.weak_topics.value or [topic])
+        code = '''import math
+import random
+
+
+def sigmoid(value):
+    """将线性得分转换为 0 到 1 的概率。"""
+    value = max(min(value, 30.0), -30.0)
+    return 1.0 / (1.0 + math.exp(-value))
+
+
+def make_churn_data(size=120, seed=42):
+    """生成不含个人信息的客户流失合成数据。"""
+    rng = random.Random(seed)
+    rows = []
+    for _ in range(size):
+        months = rng.randint(1, 72) / 72
+        support_calls = rng.randint(0, 8) / 8
+        monthly_fee = rng.uniform(20, 120) / 120
+        score = -1.8 * months + 2.2 * support_calls + 1.1 * monthly_fee - 0.4
+        label = int(rng.random() < sigmoid(score))
+        rows.append(([1.0, months, support_calls, monthly_fee], label))
+    rng.shuffle(rows)
+    return rows
+
+
+def train_logistic_regression(rows, learning_rate=0.35, epochs=300):
+    weights = [0.0] * len(rows[0][0])
+    for _ in range(epochs):
+        gradient = [0.0] * len(weights)
+        for features, label in rows:
+            probability = sigmoid(sum(w * x for w, x in zip(weights, features)))
+            for index, feature in enumerate(features):
+                gradient[index] += (probability - label) * feature
+        for index in range(len(weights)):
+            weights[index] -= learning_rate * gradient[index] / len(rows)
+    return weights
+
+
+def predict(weights, features, threshold=0.5):
+    probability = sigmoid(sum(w * x for w, x in zip(weights, features)))
+    return int(probability >= threshold)
+
+
+def confusion_matrix(weights, rows, threshold=0.5):
+    matrix = {"tp": 0, "tn": 0, "fp": 0, "fn": 0}
+    for features, label in rows:
+        prediction = predict(weights, features, threshold)
+        key = ("t" if prediction == label else "f") + ("p" if prediction else "n")
+        matrix[key] += 1
+    return matrix
+
+
+def metrics(matrix):
+    total = sum(matrix.values())
+    accuracy = (matrix["tp"] + matrix["tn"]) / total
+    precision = matrix["tp"] / max(matrix["tp"] + matrix["fp"], 1)
+    recall = matrix["tp"] / max(matrix["tp"] + matrix["fn"], 1)
+    return accuracy, precision, recall
+
+
+data = make_churn_data()
+split = int(len(data) * 0.8)
+train_rows, validation_rows = data[:split], data[split:]
+weights = train_logistic_regression(train_rows)
+matrix = confusion_matrix(weights, validation_rows)
+accuracy, precision, recall = metrics(matrix)
+
+print("验证样本数:", len(validation_rows))
+print("混淆矩阵:", matrix)
+print(f"准确率={accuracy:.3f}, 精确率={precision:.3f}, 召回率={recall:.3f}")
+'''
         content = (
-            f"# {topic} — Python 代码实践（{label}）\n\n"
-            f"## 目标\n"
-            f"通过本案例理解 {topic} 的核心实现，掌握相关 API 的使用方法。\n\n"
-            f"## 环境要求\n"
-            f"- Python 3.8+\n"
-            f"- numpy\n"
-            f"- scikit-learn\n\n"
-            f"## 代码实现\n\n"
-            f"```python\n"
-            f"import numpy as np\n"
-            f"from sklearn.model_selection import train_test_split\n\n"
-            f"# 1. 生成示例数据\n"
-            f"np.random.seed(42)\n"
-            f"X = np.random.randn(100, 3)\n"
-            f"y = (X[:, 0] + X[:, 1] > 0).astype(int)\n"
-            f"X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)\n\n"
-            f"# 2. 实现 {topic} 的核心逻辑\n"
-            f"# 使用批量梯度下降优化线性分类器的均方误差目标\n\n"
-            f"class {class_name}:\n"
-            f'    """{topic} 的简化实现"""\n\n'
-            f"    def __init__(self, learning_rate=0.01, max_iter=1000):\n"
-            f"        self.lr = learning_rate\n"
-            f"        self.max_iter = max_iter\n"
-            f"        self.weights = None\n\n"
-            f"    def fit(self, X, y):\n"
-            f"        n_samples, n_features = X.shape\n"
-            f"        self.weights = np.zeros(n_features)\n"
-            f"        for _ in range(self.max_iter):\n"
-            f"            # 计算梯度 ∇L(w)\n"
-            f"            gradients = self._compute_gradients(X, y)\n"
-            f"            # 更新权重 w = w - η * ∇L(w)\n"
-            f"            self.weights -= self.lr * gradients\n"
-            f"        return self\n\n"
-            f"    def predict(self, X):\n"
-            f"        return (X @ self.weights > 0).astype(int)\n\n"
-            f"    def _compute_gradients(self, X, y):\n"
-            f"        predictions = X @ self.weights\n"
-            f"        errors = predictions - y\n"
-            f"        return X.T @ errors / len(y)\n\n"
-            f"# 3. 训练与评估\n"
-            f"model = {class_name}(learning_rate=0.01, max_iter=1000)\n"
-            f"model.fit(X_train, y_train)\n"
-            f"train_acc = (model.predict(X_train) == y_train).mean()\n"
-            f"test_acc = (model.predict(X_test) == y_test).mean()\n"
-            f"print(f'训练准确率: {{train_acc:.2%}}')\n"
-            f"print(f'测试准确率: {{test_acc:.2%}}')\n"
-            f"```\n\n"
-            f"## 使用说明\n"
-            f"1. 复制代码到本地 .py 文件\n"
-            f"2. 确保已安装 numpy 和 scikit-learn\n"
-            f"3. 运行 `python <filename>.py`\n"
-            f"4. 观察输出结果，尝试修改超参数（learning_rate、max_iter）\n\n"
-            f"## 思考题\n"
-            f"1. 尝试增大 learning_rate，观察训练过程有何变化？\n"
-            f"2. 如果数据量增加到 10000 条，算法性能如何？\n"
-            f"3. 能否用 sklearn 中的对应方法验证你的实现？\n\n"
-            f"## 扩展练习\n"
-            f"- 添加正则化项防止过拟合\n"
-            f"- 实现 mini-batch 版本提升效率\n"
-            f"- 用真实数据集（如 Iris、Boston Housing）测试\n"
+            f"# {topic} — 客户流失分类小实验（{label}）\n\n"
+            f"## 1. 实验目标\n围绕“{goals}”，用可复现的小实验巩固{weak}，理解训练、阈值和分类指标的关系。\n\n"
+            "## 2. 环境说明\n- Python 3.10+\n- 仅使用标准库 `math` 与 `random`\n- 不访问外网，不自动安装依赖\n\n"
+            "## 3. 输入数据说明\n使用固定随机种子生成 120 条合成客户记录，仅用于学习。特征包括使用时长、客服次数和月费用，标签表示是否流失。\n\n"
+            "## 4. 分步骤任务\n1. 阅读数据生成逻辑，确认特征缩放范围。\n2. 理解逻辑回归概率与梯度更新。\n3. 固定训练/验证划分并训练模型。\n4. 从混淆矩阵计算准确率、精确率和召回率。\n5. 调整阈值并解释项目取舍。\n\n"
+            f"## 5. 完整 Python 代码\n```python\n{code}```\n\n"
+            "## 6. 预期输出\n程序会输出 24 条验证样本、一个包含 tp/tn/fp/fn 的混淆矩阵，以及 0 到 1 之间的三项指标。具体数值由代码和环境决定，不代表真实业务模型效果。\n\n"
+            "## 7. TODO 练习\n1. 将分类阈值改为 0.4，比较召回率变化。\n2. 在梯度中加入 L2 正则项，并记录验证结果。\n3. 增加一个合成特征，说明它是否应进入模型。\n\n"
+            "## 8. 调试提示\n1. 若出现溢出，确认 sigmoid 输入已限制范围。\n2. 若指标异常，先打印混淆矩阵并核对 key 的含义。\n3. 若每次结果不同，检查随机种子和数据划分。\n4. 若损失不稳定，减小学习率并增加迭代轮数。\n\n"
+            "## 9. 进阶挑战\n1. 实现不同阈值下的指标表，选择符合项目目标的阈值。\n2. 实现三折交叉验证，比较单次划分与多次验证的稳定性。\n\n"
+            "## 10. 反思问题\n1. 客户流失项目中漏判与误判的代价是否相同？\n2. 为什么不能用训练指标直接决定上线方案？\n3. 合成数据实验能证明什么，又不能证明什么？\n"
         )
-        if rag_context:
-            content += f"\n---\n## 知识库参考\n{rag_context}\n"
 
         return self._finalize(
             Resource(

@@ -68,7 +68,10 @@ class PreflightChecker:
     def run(self) -> list[CheckResult]:
         env_path = self.root / ".env"
         env_values = self._read_env(env_path) if env_path.is_file() else {}
-        effective_env = {**env_values, **os.environ}
+        # Empty process variables should not erase a value explicitly configured
+        # in the repository-level demo environment file.
+        process_env = {key: value for key, value in os.environ.items() if value.strip()}
+        effective_env = {**env_values, **process_env}
         tracked = self._tracked_files()
         return [
             self._check_python(),

@@ -63,8 +63,17 @@ def _resource(
         title="机器学习个性化学习材料",
         content=content
         or (
-            "# 线性模型基础\n\n本材料解释输入特征、模型参数和预测结果之间的关系，"
-            "并通过一个分类示例帮助学习者理解训练、验证和测试的区别。"
+            "# 线性模型基础\n\n## 学习目标\n解释输入、参数与输出。\n"
+            "## 为什么需要学习\n用于完成分类项目。\n## 前置知识\n特征与标签。\n"
+            "## 核心概念\n训练参数并验证泛化。\n## 原理与公式\n\\(J(w)=L(f_w(x),y)\\)。\n"
+            "## 分步流程\n1. 划分数据。\n2. 训练验证。\n## 完整示例\n完成一个分类实验。\n"
+            "## 常见错误\n1. **数据泄漏**：重新划分。\n2. **只看训练集**：检查验证集。\n"
+            "3. **盲目调参**：固定基线。\n4. **忽略复现**：固定种子。\n"
+            "## 快速自检\n为什么需要验证集？\n## FAQ\n"
+            "**Q1：如何开始？** 建立基线。\n**Q2：如何验证？** 使用验证集。\n"
+            "**Q3：如何调参？** 控制变量。\n**Q4：如何复现？** 固定种子。\n"
+            "**Q5：如何改进？** 根据误差分析。\n## 本节总结\n训练与验证结合。\n"
+            "## 下一步\n完成代码实验。"
         ),
         content_format=content_format,
         target_topic=context.path.steps[0].topic,
@@ -100,6 +109,9 @@ def test_reviewer_accepts_uniform_markdown_code_block_indentation() -> None:
         resource_type=ResourceType.CODING,
         content_format="python",
         content=(
+            "# 代码实践\n\n## 实验目标\n完成数组分类。\n## 环境说明\nPython。\n"
+            "## 输入数据\n整数数组。\n## 分步骤任务\n1. 定义函数。\n2. 输出结果。\n"
+            "## 完整 Python 代码\n"
             "```python\n"
             "    import numpy as np\n"
             "\n"
@@ -107,8 +119,9 @@ def test_reviewer_accepts_uniform_markdown_code_block_indentation() -> None:
             "        return (np.asarray(values) > 0).astype(int)\n"
             "\n"
             "    print(predict([-1, 1]))\n"
-            "```\n\n"
-            "该示例展示数组分类预测，并保留函数内部的相对缩进供语法审校。"
+            "```\n\n## 预期输出\n分类数组。\n## TODO 练习\n1. 调整阈值。\n2. 增加输入。\n3. 比较结果。\n"
+            "## 调试提示\n检查输入、类型、缩进和输出。\n## 进阶挑战\n1. 指标统计。\n2. 多组输入。\n"
+            "## 反思问题\n为什么需要验证？\n"
         ),
     )
 
