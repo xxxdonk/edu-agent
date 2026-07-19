@@ -70,3 +70,11 @@ AI 生成或修改的代码必须通过与人工代码相同的检查：
 ## 6. 责任声明
 
 Codex 和 DeepSeek 提供辅助能力，不能替代人工审查。项目团队对代码正确性、课程内容、第三方许可证、数据安全、比赛陈述和最终交付承担责任。
+
+## 7. 最终封版验证声明
+
+最终自动回归为后端 109 passed、前端 24/24 passed，TypeScript 与生产构建通过。新增 `scripts/preflight_demo.py` 只检查依赖、配置存在性、端口、知识库、公共契约和提交卫生，不调用完整资源生成，也不输出密钥。
+
+Planner 案例 C 的评价后重规划专项曾连续三次为 `llm_structured`；Profile weak_topics 的明确前缀污染和重复值漏合并 evaluation evidence 已在内部边界修复并增加无网络测试。公共 API、OpenAPI、StudentProfile 与 LearningPath Schema 均未变化。
+
+DeepSeek 真实结果仍会波动，冷链路可能超过两分钟。演示以案例 B 为主、案例 C 为代码实践备用；任何格式修复、fallback 或外部服务失败都必须如实记录，不能使用 Fake LLM、历史数据库结果或本地规则冒充真实模型成功。资源缓存是单进程 TTL/LRU，只缓存已审校且非 fallback 的资源。

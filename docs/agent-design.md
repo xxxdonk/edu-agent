@@ -70,3 +70,11 @@ Evaluation 只接受当前学生、路径步骤和持久化 Quiz 的题目 ID。
 - 缓存命中写入 Retriever SSE 消息和安全日志。
 - Agent、Reviewer 和任务终态写入连续 SSE 事件。
 - 日志不输出 API Key 或完整模型响应。
+
+## 8. 封版归一化与演示预检
+
+Profile 的私有边界只移除 weak topic 开头的明确字段标签，不截断普通中文冒号内容。评价摘要原文继续作为 `source=evaluation` 证据保存；即使知识点值与旧画像重复，证据也会合并，版本仍按 v1→v2 递增。
+
+Planner 的私有 Draft 固定字段并减少评价后输入，只接收画像摘要、未掌握主题、当前路径摘要和 adjustment reason。安全格式问题可归一化，核心学习内容缺失仍失败；一次修复后再次失败保持 `development_rule_based`，不会标为 `llm_structured`。
+
+演示前由 `scripts/preflight_demo.py` 做无资源生成检查。一键启动脚本自动调用预检；真实模型冷链路可能超过两分钟。缓存为单进程 TTL/LRU，fallback 资源不进入缓存，所有模式和修复结果保持可观察。

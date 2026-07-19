@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$SkipPreflight
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -8,6 +10,9 @@ $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $backendDirectory = Join-Path $projectRoot "backend"
 $frontendDirectory = Join-Path $projectRoot "frontend"
 $vite = Join-Path $frontendDirectory "node_modules\.bin\vite.cmd"
+$envFile = Join-Path $projectRoot ".env"
+$preflight = Join-Path $projectRoot "scripts\preflight_demo.py"
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
 $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
 
 function Stop-WithMessage {
@@ -93,11 +98,26 @@ function Stop-ProcessTree {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     Stop-WithMessage "Python virtual environment is missing. Install the backend dependencies from README first."
 }
+if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+    Stop-WithMessage "The root .env file is missing. Copy .env.example to .env and configure it before starting the demo."
+}
+if ($null -eq $nodeCommand) {
+    Stop-WithMessage "node.exe is missing. Install Node.js 20 or newer and try again."
+}
 if ($null -eq $npmCommand) {
     Stop-WithMessage "npm.cmd is missing. Install Node.js 20 or newer and try again."
 }
 if (-not (Test-Path -LiteralPath $vite -PathType Leaf)) {
     Stop-WithMessage "Frontend dependencies are missing. Run npm ci in the frontend directory first."
+}
+if (-not $SkipPreflight) {
+    if (-not (Test-Path -LiteralPath $preflight -PathType Leaf)) {
+        Stop-WithMessage "Demo preflight script is missing: scripts/preflight_demo.py"
+    }
+    & $python $preflight
+    if ($LASTEXITCODE -ne 0) {
+        Stop-WithMessage "Demo preflight failed. Resolve the reported blocking checks and try again."
+    }
 }
 if (-not (Test-LocalPortAvailable -Port 8000)) {
     Stop-WithMessage "Port 8000 is already in use. Stop the program using that port first."

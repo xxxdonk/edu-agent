@@ -140,7 +140,15 @@ npm test -- --run
 npm run build
 ```
 
-自动测试使用 Fake LLM 或本地实现，不访问真实网络。详细结果见 [docs/test-report.md](docs/test-report.md)。
+当前封版结果为后端 109 passed、前端 24/24 passed，TypeScript 与 Vite 生产构建通过。自动测试使用 Fake LLM 或本地实现，不访问真实网络。详细结果见 [docs/test-report.md](docs/test-report.md)。
+
+启动演示前可先执行不会生成资源的安全预检：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\preflight_demo.py
+```
+
+预检只报告环境、依赖、端口、知识库、公共契约和提交卫生状态；API Key 只检查是否存在，不显示值。一键启动脚本会自动调用该预检，从仓库根目录或 `scripts` 目录运行都使用脚本自身位置定位项目。
 
 ## 资源格式修复与 fallback
 
@@ -153,6 +161,8 @@ Quiz、MindMap 和 Reading 使用各自的私有 Draft，不改变公共 `Resour
 系统只归一化明确且安全的问题，例如单选标签、外层 Mermaid 代码围栏、换行和列表前缀。Quiz、MindMap、Reading 首次输出发生纯格式错误时，最多追加一次“只修复格式”的模型请求；网络、超时、安全或事实问题不会走格式修复。第二次仍失败时使用明确标记的 `development fallback`，随后仍接受公共 Schema 和 Reviewer 的完整校验。
 
 Profile 和 Planner 对无效结构同样最多补发一次完整 JSON 修复请求，业务校验不放宽；再次失败或发生网络、超时、安全问题时立即使用既有显式降级。Profile 的降级模式为 `development_heuristic`，Planner 的降级模式为 `development_rule_based`。界面、资源个性化原因和安全日志会显示降级，便于演示时区分真实结果。
+
+Profile 在内部边界把带明确标签的评价主题归一化为纯知识点名称，同时保留原始 `source=evaluation` 证据；普通主题中的中文冒号不会被截断。Planner 案例 C 的评价后重规划曾连续三次保持 `llm_structured`，但 DeepSeek 仍可能波动，正式录制以案例 B 为主、案例 C 作为代码实践备用，并在录制前执行预检。真实冷链路可能超过两分钟。
 
 ## 文档
 

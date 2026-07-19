@@ -24,7 +24,7 @@ from app.schemas.profile import (
     StudentProfile,
     TimeBudget,
 )
-from .models import ProfileExtractionDraft
+from .models import ProfileExtractionDraft, _normalize_weak_topics
 from .prompts import PROFILE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -190,14 +190,14 @@ class DevelopmentProfileAgent:
     def _extract_weak_topics(text: str) -> list[str]:
         results: list[str] = []
         patterns = (
-            r"(?:不懂|不会|薄弱(?:的是)?|困难(?:的是)?|不熟悉)\s*([^，。,.；;\n]{2,30})",
+            r"(?:不懂|不会|薄弱(?:点)?(?:是|的是)?|知识点|未掌握|需要加强|困难(?:的是)?|不熟悉)\s*[:：]?\s*([^，。,.；;\n]{2,30})",
             r"([^，。,.；;\n]{2,20})(?:比较薄弱|比较一般|较弱|欠缺|没掌握|总出错)",
             r"([^，。,.；;\n]{2,20}基础)(?:比较)?一般",
             r"([^，。,.；;\n]{2,20}?)(?:一直)?(?:没弄懂|不理解|不明白)",
         )
         for pattern in patterns:
             results.extend(match.strip() for match in re.findall(pattern, text))
-        return list(dict.fromkeys(results))[:5]
+        return _normalize_weak_topics(results)[:5]
 
     @staticmethod
     def _extract_cognitive_style(text: str) -> str | None:
@@ -327,6 +327,8 @@ class DevelopmentProfileAgent:
     ) -> ProfileField[list[str]]:
         old = getattr(previous, name) if previous else None
         merged = self._merge_lists(old.value if old else [], values)
+        if name == "weak_topics":
+            merged = _normalize_weak_topics(merged)
         evidence = list(old.evidence) if old else []
         if values:
             evidence.extend(
@@ -789,6 +791,9 @@ class ProfileAgent:
             request,
             previous,
         )
+        fields["weak_topics"].value = _normalize_weak_topics(
+            fields["weak_topics"].value
+        )
 
         if fields["course"].value is None:
             fields["course"] = ProfileField(
@@ -862,9 +867,6 @@ class ProfileAgent:
         key = category_key or (lambda value: value)
         known = {key(value) for value in current_values}
         new_values = [value for value in supplemental_values if key(value) not in known]
-        if not new_values:
-            return current
-
         merged = current.model_copy(deep=True)
         merged.value = [*current_values, *new_values]
         merged.evidence = self._fallback._deduplicate_evidence(
