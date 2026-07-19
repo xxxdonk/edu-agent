@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {evaluationQuestionFeedback, formatSourceTitles, parseQuiz, pathDiff, profileDiff} from './content';
+import {evaluationQuestionFeedback, formatSourceTitles, parseQuiz, pathDiff, profileDiff, renderMarkdown} from './content';
 import type {LearningPath, Resource, StudentProfile} from '@/types/api';
 
 const baseResource: Resource = {
@@ -7,6 +7,23 @@ const baseResource: Resource = {
   difficulty: 'beginner', personalization_reason: '针对薄弱点生成', source_references: [],
   review_status: 'approved', created_at: '2026-07-15T00:00:00Z', content_format: 'json', content: '',
 };
+
+describe('renderMarkdown', () => {
+  it('renders bracket-delimited display LaTeX with KaTeX', () => {
+    const html = renderMarkdown('\\[ W_{new}=W_{old}-\\alpha \\frac{\\partial L}{\\partial w} \\]');
+
+    expect(html).toContain('katex-display');
+    expect(html).toContain('class="katex"');
+    expect(html).toContain('<mfrac>');
+  });
+
+  it('renders inline LaTeX without changing surrounding Markdown', () => {
+    const html = renderMarkdown('Update with \\(\\alpha = 0.1\\) after **each step**.');
+
+    expect(html).toContain('class="katex"');
+    expect(html).toContain('<strong>each step</strong>');
+  });
+});
 
 describe('parseQuiz', () => {
   it('parses the frozen quiz resource shape', () => {

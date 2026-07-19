@@ -1,6 +1,110 @@
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
+import katex from 'katex';
 import type {LearningPath, QuizDocument, Resource, StudentProfile} from '@/types/api';
+
+function renderMath(content: string, displayMode: boolean): string {
+  return katex.renderToString(content, {
+    displayMode,
+    throwOnError: false,
+    strict: false,
+  });
+}
+
+function findClosingDollar(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length) {
+    const closing = source.indexOf('$', cursor);
+    if (closing < 0) return -1;
+
+    let backslashes = 0;
+    for (let index = closing - 1; index >= 0 && source[index] === '\\'; index -= 1) backslashes += 1;
+    if (backslashes % 2 === 0 && closing > start && !/\s/.test(source[closing - 1])) return closing;
+    cursor = closing + 1;
+  }
+  return -1;
+}
+
+function installMathRules(markdown: MarkdownIt): void {
+  markdown.inline.ruler.before('escape', 'math_inline', (state, silent) => {
+    const start = state.pos;
+    let contentStart = start;
+    let contentEnd = -1;
+    let end = -1;
+    let markup = '';
+
+    if (state.src.startsWith('\\(', start)) {
+      contentStart = start + 2;
+      contentEnd = state.src.indexOf('\\)', contentStart);
+      end = contentEnd < 0 ? -1 : contentEnd + 2;
+      markup = '\\(\\)';
+    } else if (state.src[start] === '$' && state.src[start + 1] !== '$' && !/\s/.test(state.src[start + 1] ?? '')) {
+      contentStart = start + 1;
+      contentEnd = findClosingDollar(state.src, contentStart);
+      end = contentEnd < 0 ? -1 : contentEnd + 1;
+      markup = '$';
+    }
+
+    if (contentEnd < contentStart || end < 0) return false;
+    if (!silent) {
+      const token = state.push('math_inline', 'math', 0);
+      token.content = state.src.slice(contentStart, contentEnd);
+      token.markup = markup;
+    }
+    state.pos = end;
+    return true;
+  });
+
+  markdown.block.ruler.before('fence', 'math_block', (state, startLine, endLine, silent) => {
+    const firstStart = state.bMarks[startLine] + state.tShift[startLine];
+    const firstLine = state.src.slice(firstStart, state.eMarks[startLine]);
+    const delimiter = firstLine.startsWith('\\[')
+      ? {open: '\\[', close: '\\]'}
+      : firstLine.startsWith('$$')
+        ? {open: '$$', close: '$$'}
+        : null;
+    if (!delimiter) return false;
+
+    const lines: string[] = [];
+    const firstContent = firstLine.slice(delimiter.open.length);
+    const firstClose = firstContent.indexOf(delimiter.close);
+    let nextLine = startLine + 1;
+
+    if (firstClose >= 0) {
+      if (firstContent.slice(firstClose + delimiter.close.length).trim()) return false;
+      lines.push(firstContent.slice(0, firstClose));
+    } else {
+      if (firstContent) lines.push(firstContent);
+      let closed = false;
+      for (let line = startLine + 1; line < endLine; line += 1) {
+        const lineText = state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]);
+        const close = lineText.indexOf(delimiter.close);
+        if (close < 0) {
+          lines.push(lineText);
+          continue;
+        }
+        if (lineText.slice(close + delimiter.close.length).trim()) return false;
+        lines.push(lineText.slice(0, close));
+        nextLine = line + 1;
+        closed = true;
+        break;
+      }
+      if (!closed) return false;
+    }
+
+    if (silent) return true;
+    state.line = nextLine;
+    const token = state.push('math_block', 'math', 0);
+    token.block = true;
+    token.content = lines.join('\n').trim();
+    token.map = [startLine, nextLine];
+    token.markup = delimiter.open;
+    return true;
+  });
+
+  markdown.renderer.rules.math_inline = (tokens, index) => renderMath(tokens[index].content, false);
+  markdown.renderer.rules.math_block = (tokens, index) => `${renderMath(tokens[index].content, true)}\n`;
+}
 
 const markdown = new MarkdownIt({
   html: false,
@@ -14,6 +118,8 @@ const markdown = new MarkdownIt({
     return `<pre class="hljs"><code>${escaped}</code></pre>`;
   },
 });
+
+installMathRules(markdown);
 
 export function renderMarkdown(content: string): string {
   return markdown.render(content);

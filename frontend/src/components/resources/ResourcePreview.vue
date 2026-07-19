@@ -1,7 +1,8 @@
 <template>
   <div class="resource-preview">
     <StatusBanner v-if="renderError" status="error" :message="renderError" />
-    <div v-if="resource.content_format === 'mermaid'" ref="mermaidHost" class="mermaid-host" />
+    <pre v-if="resource.content_format === 'mermaid' && renderError" class="json-preview mermaid-source-fallback"><code>{{ mermaidSource }}</code></pre>
+    <div v-if="resource.content_format === 'mermaid'" v-show="!renderError" ref="mermaidHost" class="mermaid-host" />
     <div v-else-if="resource.content_format === 'markdown' || resource.content_format === 'text'" class="prose" v-html="markdownHtml" />
     <div v-else-if="resource.content_format === 'python' && codingIsMarkdown" class="prose" v-html="codingMarkdownHtml" />
     <pre v-else-if="resource.content_format === 'python'" class="hljs code-block"><code v-html="pythonHtml" /></pre>
@@ -10,10 +11,11 @@
 </template>
 
 <script setup lang="ts">
-import {computed, nextTick, onMounted, ref, watch} from 'vue';
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue';
 import hljs from 'highlight.js';
 import StatusBanner from '@/components/common/StatusBanner.vue';
 import {renderMarkdown} from '@/utils/content';
+import {startIsolatedMermaidRender, type MermaidRenderSession} from '@/utils/mermaid';
 import type {Resource} from '@/types/api';
 
 const props = defineProps<{resource: Resource}>();
@@ -36,25 +38,77 @@ const formattedJson = computed(() => {
   catch { return props.resource.content; }
 });
 
+let renderGeneration = 0;
+let renderSequence = 0;
+let activeRender: MermaidRenderSession | null = null;
+
+function cancelActiveRender() {
+  activeRender?.cancel();
+  activeRender = null;
+}
+
 async function renderMermaid() {
-  if (props.resource.content_format !== 'mermaid' || !mermaidHost.value) return;
+  const generation = ++renderGeneration;
+  cancelActiveRender();
   renderError.value = '';
+  if (props.resource.content_format !== 'mermaid' || !mermaidHost.value) return;
+
+  const host = mermaidHost.value;
+  const resourceId = props.resource.resource_id;
+  const resourceContent = props.resource.content;
+  const source = mermaidSource.value;
+  const isCurrent = () => (
+    generation === renderGeneration
+    && props.resource.content_format === 'mermaid'
+    && props.resource.resource_id === resourceId
+    && props.resource.content === resourceContent
+  );
+  host.replaceChildren();
+
   try {
     const {default: mermaid} = await import('mermaid');
-    mermaid.initialize({startOnLoad: false, securityLevel: 'strict', theme: 'neutral'});
-    const resourceId = props.resource.resource_id;
-    const result = await mermaid.render(`eduagent-${resourceId.replace(/[^a-zA-Z0-9]/g, '')}-${Date.now()}`, mermaidSource.value);
-    if (props.resource.resource_id !== resourceId) return;
-    if (mermaidHost.value) mermaidHost.value.innerHTML = result.svg;
+    if (!isCurrent()) return;
+
+    const temporaryContainer = host.ownerDocument.createElement('div');
+    temporaryContainer.className = 'mermaid-render-sandbox';
+    temporaryContainer.setAttribute('aria-hidden', 'true');
+    host.appendChild(temporaryContainer);
+
+    const safeResourceId = resourceId.replace(/[^a-zA-Z0-9]/g, '') || 'resource';
+    const session = startIsolatedMermaidRender({
+      mermaid,
+      source,
+      renderId: `eduagent-${safeResourceId}-${++renderSequence}`,
+      container: temporaryContainer,
+      isCurrent,
+    });
+    activeRender = session;
+    const outcome = await session.result;
+    if (activeRender === session) activeRender = null;
+    if (!isCurrent() || outcome.status === 'stale') return;
+
+    host.replaceChildren();
+    if (outcome.status === 'success') {
+      host.innerHTML = outcome.svg;
+      outcome.bindFunctions?.(host);
+      return;
+    }
+    renderError.value = '思维导图暂时无法渲染，已保留原始 Mermaid 源码。';
   } catch {
-    renderError.value = '思维导图渲染失败，已保留原始 Mermaid 内容供检查。';
-    if (mermaidHost.value) mermaidHost.value.textContent = props.resource.content;
+    if (!isCurrent()) return;
+    host.replaceChildren();
+    renderError.value = '思维导图暂时无法渲染，已保留原始 Mermaid 源码。';
   }
 }
 
 onMounted(renderMermaid);
 watch(
-  [() => props.resource.resource_id, () => props.resource.content],
+  [() => props.resource.resource_id, () => props.resource.content, () => props.resource.content_format],
   async () => { await nextTick(); await renderMermaid(); },
 );
+onBeforeUnmount(() => {
+  renderGeneration += 1;
+  cancelActiveRender();
+  mermaidHost.value?.replaceChildren();
+});
 </script>
