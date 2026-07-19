@@ -8,7 +8,7 @@
       <el-progress v-if="profile" type="circle" :width="54" :stroke-width="5" :percentage="Math.round(profile.confidence * 100)" />
     </div>
 
-    <StatusBanner v-if="status === 'loading'" status="loading" message="正在分析学生画像并核验字段证据" />
+    <StatusBanner v-if="status === 'loading'" status="loading" message="正在分析画像：识别字段 → 核验对话证据 → 计算置信度" />
     <el-empty v-else-if="!profile" description="完成一轮自然语言对话后生成画像" :image-size="88" />
     <template v-else>
       <div class="profile-meta">
@@ -19,15 +19,21 @@
       <StatusBanner
         v-if="meta?.extraction_mode === 'development_heuristic'"
         status="partial"
-        message="结构化 LLM 未成功完成，本轮启发式接管，精确原因见后端 profile_fallback 日志"
+        message="本轮使用开发降级结果，不代表结构化模型成功；已有画像仍可继续学习流程。"
       />
       <div v-if="meta?.missing_dimensions.length" class="missing-line">
         待补充：{{ meta.missing_dimensions.map(labelForKey).join('、') }}
       </div>
       <div class="profile-grid">
-        <article v-for="dimension in dimensions" :key="dimension.key" class="profile-dimension">
+        <article
+          v-for="dimension in dimensions"
+          :key="dimension.key"
+          class="profile-dimension"
+          :class="`profile-dimension--${fieldState(dimension.field)}`"
+        >
           <div class="profile-dimension__head">
             <span>{{ dimension.label }}</span>
+            <span class="profile-field-state">{{ fieldStateLabel(dimension.field) }}</span>
             <strong>{{ Math.round(dimension.field.confidence * 100) }}%</strong>
           </div>
           <div class="profile-dimension__value">{{ formatValue(dimension.field.value) }}</div>
@@ -84,10 +90,20 @@ const dimensions = computed(() => {
 const modeLabel = computed(() => props.meta?.extraction_mode === 'llm_structured' ? '结构化大模型结果' : props.meta ? '开发适配器结果' : '');
 
 function labelForKey(key: string) { return labels[key] ?? key; }
+function hasValue(value: unknown) {
+  return value !== null && value !== undefined && value !== '' && (!Array.isArray(value) || value.length > 0);
+}
+function fieldState(field: ProfileField<unknown>) {
+  if (!hasValue(field.value)) return 'missing';
+  return field.confidence < 0.65 ? 'low' : 'recognized';
+}
+function fieldStateLabel(field: ProfileField<unknown>) {
+  return ({missing: '信息不足', low: '待确认', recognized: '已理解'} as const)[fieldState(field)];
+}
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}).format(new Date(value)); }
 function formatValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '未识别';
-  if (Array.isArray(value)) return value.length ? value.join('、') : '未识别';
+  if (value === null || value === undefined || value === '') return '信息不足';
+  if (Array.isArray(value)) return value.length ? value.join('、') : '信息不足';
   if (typeof value === 'object') {
     const budget = value as {minutes_per_day?: number; days_per_week?: number};
     return `每天 ${budget.minutes_per_day ?? 0} 分钟 · 每周 ${budget.days_per_week ?? 0} 天`;

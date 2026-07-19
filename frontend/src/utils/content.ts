@@ -36,8 +36,8 @@ export function parseQuiz(resource: Resource | undefined): QuizDocument | null {
 }
 
 function displayProfileValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '未识别';
-  if (Array.isArray(value)) return value.length ? value.join('、') : '未识别';
+  if (value === null || value === undefined || value === '') return '信息不足';
+  if (Array.isArray(value)) return value.length ? value.join('、') : '信息不足';
   if (typeof value === 'object') {
     const budget = value as {minutes_per_day?: number; days_per_week?: number};
     return `每天 ${budget.minutes_per_day ?? 0} 分钟，每周 ${budget.days_per_week ?? 0} 天`;

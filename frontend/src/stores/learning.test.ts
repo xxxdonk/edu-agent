@@ -4,7 +4,7 @@ import {ref} from 'vue';
 import {api} from '@/api/client';
 import {connectTaskEvents} from '@/api/sse';
 import {useLearningStore} from './learning';
-import type {EvaluationResult, LearningPath, ProfileChatResponse, ProfileField, Resource, TaskState} from '@/types/api';
+import type {EvaluationResult, LearningPath, ProfileChatResponse, ProfileField, Resource, TaskEvent, TaskState} from '@/types/api';
 
 vi.mock('@/api/client', () => ({
   api: {
@@ -236,6 +236,27 @@ describe('learning store profile chat', () => {
     expect(store.profileStatus).toBe('success');
   });
 
+  it('fills a demo case into the composer without sending or replacing conversation history', () => {
+    const store = useLearningStore();
+    const originalMessages = [...store.messages];
+    const demoInput = '演示案例 B：考试复习与分层练习。';
+
+    store.fillDemoCase(demoInput);
+
+    expect(store.composerDraft).toBe(demoInput);
+    expect(store.messages).toEqual(originalMessages);
+    expect(api.chat).not.toHaveBeenCalled();
+  });
+
+  it('enables and exits demo mode as refresh-local UI state', () => {
+    const store = useLearningStore();
+    expect(store.demoMode).toBe(false);
+    store.setDemoMode(true);
+    expect(store.demoMode).toBe(true);
+    store.setDemoMode(false);
+    expect(store.demoMode).toBe(false);
+  });
+
   it('clears resources and evaluation when the selected path step changes', () => {
     const store = useLearningStore();
     const path = learningPath(1);
@@ -276,6 +297,30 @@ describe('learning store profile chat', () => {
     expect(store.evaluation).toBeNull();
     expect(store.evaluationStatus).toBe('idle');
     expect(api.generateResources).toHaveBeenCalledWith(expect.objectContaining({step: 1, regenerate: true}));
+  });
+
+  it('deduplicates resource events and keeps heartbeat out of the business timeline', async () => {
+    vi.mocked(api.generateResources).mockResolvedValue({
+      task_id: 'task-1', status: 'pending', status_url: '/api/tasks/task-1', events_url: '/api/tasks/task-1/events',
+    });
+    const store = useLearningStore();
+    store.profile = profileResponse(1, '').profile;
+    store.path = learningPath(1);
+    await store.startGeneration();
+    const handlers = vi.mocked(connectTaskEvents).mock.calls.at(-1)?.[1];
+    const agentEvent: TaskEvent = {
+      event_id: 'event-1', task_id: 'task-1', sequence: 1, event_type: 'agent', status: 'started', progress: 45,
+      message: 'quiz generation started', agent: 'quiz_agent', resource_type: 'quiz', error: null, created_at: '2026-07-19T00:00:00Z',
+    };
+    handlers?.onEvent(agentEvent);
+    handlers?.onEvent(agentEvent);
+    handlers?.onEvent({...agentEvent, event_id: 'heartbeat-2', sequence: 2, event_type: 'heartbeat'});
+    handlers?.onEvent({...agentEvent, event_id: 'review-3', sequence: 3, event_type: 'review', agent: 'explanation_agent'});
+
+    expect(store.taskEvents).toHaveLength(2);
+    expect(store.taskTimeline.find((stage) => stage.key === 'generation')?.resources?.find((item) => item.key === 'quiz_agent')?.status).toBe('running');
+    expect(store.taskTimeline.find((stage) => stage.key === 'review')?.status).toBe('running');
+    store.resetSession();
   });
 
   it('ignores a resource request that returns after the user switches steps', async () => {
@@ -371,6 +416,26 @@ describe('learning store profile chat', () => {
     expect(store.resourceStatus).toBe(expected);
     expect(store.task?.status).toBe(status);
     expect(store.resources).toHaveLength(ids.length);
+    store.resetSession();
+  });
+
+  it('allows an explicit retry after a failed terminal task', async () => {
+    vi.mocked(api.generateResources).mockResolvedValue({
+      task_id: 'task-1', status: 'pending', status_url: '/api/tasks/task-1', events_url: '/api/tasks/task-1/events',
+    });
+    vi.mocked(api.task).mockResolvedValue(terminalTask('failed', [], ['all agents failed']));
+    const store = useLearningStore();
+    store.profile = profileResponse(1, '').profile;
+    store.path = learningPath(1);
+
+    await store.startGeneration();
+    vi.mocked(connectTaskEvents).mock.calls.at(-1)?.[1].onTerminal();
+    await flushMicrotasks();
+    expect(store.resourceStatus).toBe('error');
+
+    await store.startGeneration(true);
+    expect(api.generateResources).toHaveBeenCalledTimes(2);
+    expect(api.generateResources).toHaveBeenLastCalledWith(expect.objectContaining({regenerate: true}));
     store.resetSession();
   });
 });
