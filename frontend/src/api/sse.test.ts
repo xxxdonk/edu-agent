@@ -9,6 +9,7 @@ class FakeEventSource {
 
   readonly url: string;
   readonly close = vi.fn();
+  onopen: ((event: Event) => void) | null = null;
   onmessage: Listener | null = null;
   onerror: ((event: Event) => void) | null = null;
   private readonly listeners = new Map<string, Listener[]>();
@@ -32,6 +33,10 @@ class FakeEventSource {
 
   fail() {
     this.onerror?.({type: 'error'} as Event);
+  }
+
+  open() {
+    this.onopen?.({type: 'open'} as Event);
   }
 }
 
@@ -85,6 +90,38 @@ describe('connectTaskEvents', () => {
     resumed.emit('agent', taskEvent(2, 'completed'));
     expect(onEvent.mock.calls.map(([event]) => event.sequence)).toEqual([1, 2]);
     stop();
+  });
+
+  it('uses event identity as a stable fallback when sequence is absent', () => {
+    const onEvent = vi.fn();
+    connectTaskEvents('/api/tasks/task-1/events', {onEvent, onTerminal: vi.fn(), onError: vi.fn()});
+    const source = FakeEventSource.instances[0];
+    const first = {...taskEvent(1, 'started'), event_id: 'without-sequence-1'} as Partial<TaskEvent>;
+    delete first.sequence;
+    const second = {...first, event_id: 'without-sequence-2', message: 'another event'};
+
+    source.emit('agent', first as TaskEvent);
+    source.emit('agent', first as TaskEvent);
+    source.emit('agent', second as TaskEvent);
+
+    expect(onEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports connecting, reconnecting and closed without adding synthetic events', async () => {
+    const onConnectionChange = vi.fn();
+    connectTaskEvents('/api/tasks/task-1/events', {
+      onEvent: vi.fn(), onTerminal: vi.fn(), onError: vi.fn(), onConnectionChange,
+    });
+    const first = FakeEventSource.instances[0];
+    expect(onConnectionChange).toHaveBeenLastCalledWith('connecting');
+    first.open();
+    expect(onConnectionChange).toHaveBeenLastCalledWith('connected');
+    first.fail();
+    expect(onConnectionChange).toHaveBeenLastCalledWith('reconnecting');
+    await vi.advanceTimersByTimeAsync(1000);
+    const resumed = FakeEventSource.instances[1];
+    resumed.emit('task', taskEvent(1, 'completed', 'task'));
+    expect(onConnectionChange).toHaveBeenLastCalledWith('closed');
   });
 
   it.each(['completed', 'partial_success', 'failed'])('handles %s as a stable terminal state', (status) => {

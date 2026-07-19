@@ -6,6 +6,12 @@
     </div>
     <el-empty v-if="!quiz" description="生成分层练习题后可提交学习评价" />
     <template v-else>
+      <StatusBanner v-if="status === 'loading'" status="loading" message="正在逐题评分 → 识别薄弱知识点 → 更新画像 → 重新规划路径" />
+      <StatusBanner v-else-if="status === 'error'" status="error" message="评价没有成功，当前答案仍保留在页面中。" action-label="重试评价" @action="retryEvaluation" />
+      <div v-else-if="!result" class="evaluation-ready-state">
+        <strong>完成题目后提交 Evaluation</strong>
+        <span>系统将读取持久化标准答案评分，并展示画像与路径变化。</span>
+      </div>
       <div class="quiz-list">
         <article v-for="(question, index) in quiz.questions" :key="question.id" class="quiz-question">
           <div class="question-number">{{ index + 1 }}</div>
@@ -28,7 +34,6 @@
         <label>用时 <el-input-number v-model="timeSpent" :min="0" :max="600" /> 分钟</label>
         <el-button type="primary" :icon="Checked" :loading="status === 'loading'" :disabled="!allAnswered" @click="$emit('submit', answers, timeSpent)">提交评价</el-button>
       </div>
-      <StatusBanner v-if="status === 'error'" status="error" message="评价没有成功，当前答案仍保留在页面中" />
       <div v-if="result" class="evaluation-result">
         <div class="score-block" :class="{'score-block--passed': result.passed}">
           <div><strong>{{ Math.round(result.mastery_score * 100) }}</strong><span>总分 / 100</span></div>
@@ -38,7 +43,36 @@
           <div><h4>薄弱知识点</h4><p>{{ result.weak_topics.join('、') || '本轮未发现明显薄弱点' }}</p></div>
           <div><h4>学习建议</h4><p>{{ suggestion }}</p></div>
         </div>
-        <pre class="feedback-text">{{ result.feedback }}</pre>
+        <section class="change-summary" aria-labelledby="change-summary-title">
+          <div class="diff-heading">
+            <div><p class="section-kicker">Evaluation 影响</p><h4 id="change-summary-title">学习方案变化摘要</h4></div>
+            <el-tag type="success" effect="plain">已同步更新</el-tag>
+          </div>
+          <div class="change-summary-grid">
+            <article><span>画像版本</span><strong>{{ changeSummary.profileVersion }}</strong></article>
+            <article><span>当前掌握情况</span><strong>{{ changeSummary.mastery }}</strong></article>
+            <article><span>路径步骤</span><strong>{{ changeSummary.pathSteps }}</strong></article>
+            <article class="change-summary__wide">
+              <span>新增或加强的薄弱点</span>
+              <div v-if="changeSummary.addedWeakTopics.length" class="topic-tags">
+                <el-tag v-for="topic in changeSummary.addedWeakTopics" :key="topic" type="warning" effect="plain">{{ topic }}</el-tag>
+              </div>
+              <strong v-else>本轮无新增薄弱点</strong>
+            </article>
+            <article class="change-summary__wide"><span>重新规划原因</span><strong>{{ changeSummary.adjustmentReason || '本次未返回该项变化' }}</strong></article>
+            <article class="change-summary__wide"><span>新路径重点</span><strong>{{ changeSummary.newFocus.join(' → ') || '本次未返回该项变化' }}</strong></article>
+          </div>
+        </section>
+        <StatusBanner
+          v-if="path?.generation_mode === 'development_rule_based'"
+          status="partial"
+          message="评价后的路径使用开发降级规划，未标记为结构化模型结果。"
+        />
+        <el-collapse class="evaluation-raw">
+          <el-collapse-item title="查看原始评价反馈">
+            <pre class="feedback-text">{{ result.feedback }}</pre>
+          </el-collapse-item>
+        </el-collapse>
         <DiffComparison title="画像更新前后" :rows="profileRows" empty-text="本轮评价未改变画像字段" />
         <DiffComparison title="路径更新前后" :rows="pathRows" empty-text="本轮评价未调整学习路径" />
       </div>
@@ -52,6 +86,7 @@ import {Checked} from '@element-plus/icons-vue';
 import DiffComparison from './DiffComparison.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
 import {evaluationQuestionFeedback, pathDiff, profileDiff} from '@/utils/content';
+import {evaluationChangeSummary} from '@/utils/presentation';
 import type {EvaluationResult, LearningPath, QuizDocument, StudentProfile, ViewStatus} from '@/types/api';
 
 const props = defineProps<{
@@ -59,7 +94,7 @@ const props = defineProps<{
   profile: StudentProfile | null; previousProfile: StudentProfile | null;
   path: LearningPath | null; previousPath: LearningPath | null;
 }>();
-defineEmits<{(event: 'submit', answers: Record<string, string>, minutes: number): void}>();
+const emit = defineEmits<{(event: 'submit', answers: Record<string, string>, minutes: number): void}>();
 const answers = reactive<Record<string, string>>({});
 const timeSpent = ref(12);
 const allAnswered = computed(() => props.quiz?.questions.every((question) => answers[question.id]?.trim()) ?? false);
@@ -68,12 +103,16 @@ const quizFingerprint = computed(() => JSON.stringify(
 ));
 const profileRows = computed(() => profileDiff(props.previousProfile, props.profile));
 const pathRows = computed(() => pathDiff(props.previousPath, props.path));
+const changeSummary = computed(() => evaluationChangeSummary(
+  props.previousProfile, props.profile, props.previousPath, props.path, props.result,
+));
 const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用代码实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与代码资源后再次练习。`);
 
 watch(quizFingerprint, () => {
   Object.keys(answers).forEach((key) => delete answers[key]);
   timeSpent.value = 12;
 });
+function retryEvaluation() { emit('submit', {...answers}, timeSpent.value); }
 function levelLabel(level: string) { return ({basic: '基础', intermediate: '进阶', advanced: '挑战'} as Record<string, string>)[level] ?? level; }
 function typeLabel(type: string) { return ({single_choice: '单选题', short_answer: '简答题', comprehensive: '综合题'} as Record<string, string>)[type] ?? type; }
 function questionResult(questionId: string) { return evaluationQuestionFeedback(props.result?.feedback ?? '', questionId); }

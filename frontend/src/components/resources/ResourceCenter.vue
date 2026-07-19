@@ -2,34 +2,63 @@
   <section class="workspace-panel resource-center">
     <div class="panel-title-row">
       <div><p class="section-kicker">资源中心</p><h2>五类个性化学习资源</h2></div>
-      <el-button type="primary" :icon="MagicStick" :loading="status === 'loading'" :disabled="!canGenerate" @click="$emit('generate')">
+      <el-button
+        type="primary"
+        :icon="MagicStick"
+        :loading="status === 'loading'"
+        :disabled="!canGenerate"
+        :title="canGenerate ? '为当前路径步骤生成五类资源' : '请先生成画像和学习路径'"
+        @click="$emit('generate')"
+      >
         {{ resources.length ? '重试生成' : '生成五类资源' }}
       </el-button>
     </div>
-    <StatusBanner v-if="status === 'loading'" status="loading" message="Orchestrator 正在并行调度资源 Agent，请查看右侧生成轨迹" />
-    <StatusBanner v-else-if="status === 'partial'" status="partial" message="部分资源生成失败，成功资源仍可正常查看和评价" />
-    <StatusBanner v-else-if="status === 'error'" status="error" message="本次没有获得可用资源，请保留画像和路径后重试生成" />
+    <StatusBanner v-if="status === 'loading'" status="loading" message="正在检索知识库并并行生成五类资源，随后逐项进入 Reviewer 审校" />
+    <StatusBanner v-else-if="status === 'partial'" status="partial" message="任务部分完成：成功资源可继续使用，失败项可单独查看后整体重试。" action-label="重试失败项" @action="$emit('generate')" />
+    <StatusBanner v-else-if="status === 'error'" status="error" message="本次没有获得可用资源，画像和路径均已保留。" action-label="重新生成" @action="$emit('generate')" />
+    <StatusBanner v-if="fallbackMode" status="partial" :message="fallbackMode" />
     <div v-if="failures.length" class="resource-errors">
-      <p v-for="(failure, index) in failures" :key="index">{{ failure }}</p>
+      <article v-for="(failure, index) in failures" :key="index">
+        <strong>资源 {{ index + 1 }} 未完成</strong>
+        <p>{{ safeFailureMessage(failure) }}</p>
+      </article>
     </div>
     <el-empty v-if="!resources.length && status !== 'loading'" description="选择路径步骤后生成课程讲解、思维导图、练习、阅读和代码" />
     <div v-else-if="resources.length" class="resource-layout">
       <nav class="resource-nav" aria-label="学习资源列表">
-        <button v-for="resource in sortedResources" :key="resource.resource_id" type="button" :class="{'is-active': selectedId === resource.resource_id}" @click="selectedId = resource.resource_id">
+        <button
+          v-for="resource in sortedResources"
+          :key="resource.resource_id"
+          type="button"
+          class="resource-nav-card"
+          :class="[`resource-type--${resource.resource_type}`, {'is-active': selectedId === resource.resource_id}]"
+          :aria-pressed="selectedId === resource.resource_id"
+          @click="selectedId = resource.resource_id"
+        >
           <component :is="resourceIcon(resource.resource_type)" />
-          <span><small>{{ typeLabel[resource.resource_type] }}</small><strong>{{ resource.title }}</strong></span>
-          <el-tag size="small" :type="reviewType(resource.review_status)" effect="plain">{{ reviewLabel[resource.review_status] }}</el-tag>
+          <span class="resource-nav-card__copy">
+            <small>{{ typeLabel[resource.resource_type] }}</small>
+            <strong>{{ resource.title }}</strong>
+            <em>{{ resource.target_topic }} · {{ resource.source_references.length }} 个来源</em>
+          </span>
+          <span class="resource-nav-card__status">
+            <el-tag size="small" type="success" effect="plain">已生成</el-tag>
+            <el-tag size="small" :type="reviewType(resource.review_status)" effect="plain">{{ reviewLabel[resource.review_status] }}</el-tag>
+          </span>
         </button>
       </nav>
       <article v-if="selectedResource" class="resource-detail">
         <div class="resource-heading">
           <div><p>{{ typeLabel[selectedResource.resource_type] }}</p><h3>{{ selectedResource.title }}</h3></div>
-          <el-tag>{{ difficultyLabel[selectedResource.difficulty] }}</el-tag>
+          <div class="resource-heading__tags">
+            <el-tag>{{ difficultyLabel[selectedResource.difficulty] }}</el-tag>
+            <el-tag :type="reviewType(selectedResource.review_status)" effect="plain">{{ reviewLabel[selectedResource.review_status] }}</el-tag>
+          </div>
         </div>
         <dl class="resource-metadata">
           <div><dt>目标知识点</dt><dd>{{ selectedResource.target_topic }}</dd></div>
           <div><dt>个性化原因</dt><dd>{{ selectedResource.personalization_reason }}</dd></div>
-          <div><dt>内容来源</dt><dd>{{ formatSourceTitles(selectedResource.source_references) }}</dd></div>
+          <div><dt>内容来源</dt><dd>{{ selectedResource.source_references.length }} 项 · {{ formatSourceTitles(selectedResource.source_references) }}</dd></div>
           <div><dt>审校状态</dt><dd>{{ reviewLabel[selectedResource.review_status] }}</dd></div>
           <div><dt>创建时间</dt><dd>{{ formatDate(selectedResource.created_at) }}</dd></div>
         </dl>
@@ -58,8 +87,9 @@ import ResourcePreview from './ResourcePreview.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
 import type {Difficulty, Resource, ResourceType, ReviewStatus, ViewStatus} from '@/types/api';
 import {formatSourceTitles} from '@/utils/content';
+import {safeFailureMessage} from '@/utils/presentation';
 
-const props = defineProps<{resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean}>();
+const props = defineProps<{resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean; fallbackMode?: string | null}>();
 defineEmits<{(event: 'generate'): void}>();
 const selectedId = ref('');
 const order: ResourceType[] = ['explanation', 'mind_map', 'quiz', 'reading', 'coding'];

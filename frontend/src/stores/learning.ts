@@ -3,8 +3,10 @@ import {defineStore} from 'pinia';
 import {api} from '@/api/client';
 import {API_ENDPOINTS} from '@/api/config';
 import {connectTaskEvents} from '@/api/sse';
+import type {StreamConnectionStatus} from '@/api/sse';
 import {describeActualError, getApiErrorDetails, toUserMessage} from '@/utils/errors';
 import {parseQuiz} from '@/utils/content';
+import {buildTaskTimeline} from '@/utils/presentation';
 import type {
   ApiIssue,
   ChatMessage,
@@ -56,13 +58,14 @@ function id(prefix: string): string {
 
 function normalizeAgentKey(event: TaskEvent): string {
   const raw = (event.agent || '').toLowerCase();
+  if (event.event_type === 'review') return 'reviewer_agent';
   if (raw.includes('explanation')) return 'explanation_agent';
   if (raw.includes('mind')) return 'mind_map_agent';
   if (raw.includes('quiz')) return 'quiz_agent';
   if (raw.includes('reading')) return 'reading_agent';
   if (raw.includes('coding')) return 'coding_agent';
   if (raw.includes('review')) return 'reviewer_agent';
-  return event.event_type === 'review' ? 'reviewer_agent' : 'system';
+  return 'system';
 }
 
 function normalizeStatus(status: string): UiAgentStatus {
@@ -75,6 +78,8 @@ function normalizeStatus(status: string): UiAgentStatus {
 export const useLearningStore = defineStore('learning', () => {
   const studentId = ref('demo-student-001');
   const conversationId = ref(id('conversation'));
+  const composerDraft = ref('');
+  const demoMode = ref(false);
   const messages = ref<UiChatMessage[]>([
     {
       message_id: id('assistant'),
@@ -100,6 +105,7 @@ export const useLearningStore = defineStore('learning', () => {
   const pathStatus = ref<ViewStatus>('idle');
   const resourceStatus = ref<ViewStatus>('idle');
   const evaluationStatus = ref<ViewStatus>('idle');
+  const sseConnectionStatus = ref<StreamConnectionStatus | 'idle'>('idle');
   const healthMessage = ref('尚未检查后端连接');
   const notice = ref('');
 
@@ -114,6 +120,7 @@ export const useLearningStore = defineStore('learning', () => {
     profileMeta.value?.extraction_mode.startsWith('development_') || path.value?.generation_mode.startsWith('development_'),
   );
   const hasCoreContext = computed(() => Boolean(profile.value && path.value));
+  const taskTimeline = computed(() => buildTaskTimeline(taskEvents.value, task.value, traces.value));
 
   function isLearningPath(value: unknown, expectedPathId?: string): value is LearningPath {
     if (!value || typeof value !== 'object') return false;
@@ -238,11 +245,8 @@ export const useLearningStore = defineStore('learning', () => {
       .map(({message_id, role, content}) => ({message_id, role, content}));
   }
 
-  async function sendMessage(content: string) {
-    const trimmed = content.trim();
-    if (!trimmed || profileStatus.value === 'loading') return;
-    stopAssistantAnimation(true);
-    messages.value.push({message_id: id('user'), role: 'user', content: trimmed});
+  async function requestProfile() {
+    if (profileStatus.value === 'loading') return;
     profileStatus.value = 'loading';
     notice.value = '';
     setTrace('profile_agent', 'running', '正在从自然语言中提取画像证据', 12);
@@ -273,6 +277,19 @@ export const useLearningStore = defineStore('learning', () => {
     }
   }
 
+  async function sendMessage(content: string) {
+    const trimmed = content.trim();
+    if (!trimmed || profileStatus.value === 'loading') return;
+    stopAssistantAnimation(true);
+    messages.value.push({message_id: id('user'), role: 'user', content: trimmed});
+    await requestProfile();
+  }
+
+  async function retryProfile() {
+    if (!messages.value.some((message) => message.role === 'user')) return;
+    await requestProfile();
+  }
+
   async function generatePath(evaluationSummary: string | null = null) {
     if (!profile.value || pathStatus.value === 'loading') return;
     pathStatus.value = 'loading';
@@ -301,9 +318,17 @@ export const useLearningStore = defineStore('learning', () => {
   }
 
   function applyTaskEvent(event: TaskEvent) {
-    if (taskEvents.value.some((item) => item.sequence === event.sequence)) return;
+    if (event.event_type === 'heartbeat') return;
+    const sequence = Number(event.sequence);
+    const hasSequence = Number.isFinite(sequence);
+    if (taskEvents.value.some((item) => item.event_id === event.event_id || (hasSequence && Number(item.sequence) === sequence))) return;
     taskEvents.value.push(event);
-    taskEvents.value.sort((a, b) => a.sequence - b.sequence);
+    taskEvents.value.sort((left, right) => {
+      const leftSequence = Number(left.sequence);
+      const rightSequence = Number(right.sequence);
+      if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence)) return leftSequence - rightSequence;
+      return left.created_at.localeCompare(right.created_at) || left.event_id.localeCompare(right.event_id);
+    });
     if (event.event_type === 'agent' || event.event_type === 'review') {
       if (event.status === 'started') setTrace('retriever', 'completed', '课程知识库检索已完成', Math.min(event.progress, 38));
       const key = normalizeAgentKey(event);
@@ -319,6 +344,7 @@ export const useLearningStore = defineStore('learning', () => {
     closeStream = null;
     if (pollingTimer !== null) globalThis.clearInterval(pollingTimer);
     pollingTimer = null;
+    if (sseConnectionStatus.value !== 'idle') sseConnectionStatus.value = 'closed';
   }
 
   function clearStepArtifacts() {
@@ -385,6 +411,7 @@ export const useLearningStore = defineStore('learning', () => {
     task.value = null;
     taskEvents.value = [];
     resourceStatus.value = 'loading';
+    sseConnectionStatus.value = 'connecting';
     notice.value = '';
     setTrace('retriever', 'running', '正在检索课程知识库与来源片段', 32);
     const payload = {
@@ -410,6 +437,9 @@ export const useLearningStore = defineStore('learning', () => {
         onError: (message) => {
           if (epoch === resourceGenerationEpoch) notice.value = message;
         },
+        onConnectionChange: (status) => {
+          if (epoch === resourceGenerationEpoch) sseConnectionStatus.value = status;
+        },
       });
       pollingTimer = globalThis.setInterval(async () => {
         if (epoch !== resourceGenerationEpoch) return;
@@ -425,6 +455,7 @@ export const useLearningStore = defineStore('learning', () => {
     } catch (error) {
       if (epoch !== resourceGenerationEpoch) return;
       resourceStatus.value = 'error';
+      sseConnectionStatus.value = 'closed';
       notice.value = toUserMessage(error);
       setTrace('retriever', 'failed', notice.value, 30, notice.value);
       recordIssue(API_ENDPOINTS.resourcesGenerate, payload, '202 TaskAcceptedResponse，随后通过 SSE 返回进度', error, [
@@ -521,6 +552,7 @@ export const useLearningStore = defineStore('learning', () => {
       message_id: id('assistant'), role: 'assistant',
       content: '新的学习会话已开始。请自然地介绍你的学习情况，我会逐步完善画像。',
     }];
+    composerDraft.value = '';
     profile.value = null;
     previousProfile.value = null;
     profileMeta.value = null;
@@ -533,14 +565,23 @@ export const useLearningStore = defineStore('learning', () => {
     evaluation.value = null;
     traces.value = traceTemplate.map((item) => ({...item}));
     profileStatus.value = pathStatus.value = resourceStatus.value = evaluationStatus.value = 'idle';
+    sseConnectionStatus.value = 'idle';
     notice.value = '';
   }
 
+  function fillDemoCase(input: string) {
+    composerDraft.value = input;
+  }
+
+  function setDemoMode(enabled: boolean) {
+    demoMode.value = enabled;
+  }
+
   return {
-    studentId, messages, profile, previousProfile, profileMeta, path, previousPath, selectedStep,
+    studentId, messages, composerDraft, demoMode, profile, previousProfile, profileMeta, path, previousPath, selectedStep,
     resources, resourceFailures, task, taskEvents, traces, evaluation, apiIssues, healthStatus,
-    profileStatus, pathStatus, resourceStatus, evaluationStatus, healthMessage, notice, quiz,
-    developmentMode, hasCoreContext, checkHealth, sendMessage, generatePath, startGeneration,
-    submitEvaluation, resetSession, stopAssistantAnimation, selectStep,
+    profileStatus, pathStatus, resourceStatus, evaluationStatus, sseConnectionStatus, healthMessage, notice, quiz,
+    developmentMode, hasCoreContext, taskTimeline, checkHealth, sendMessage, retryProfile, generatePath, startGeneration,
+    submitEvaluation, resetSession, stopAssistantAnimation, selectStep, fillDemoCase, setDemoMode,
   };
 });
