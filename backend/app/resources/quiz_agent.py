@@ -6,9 +6,11 @@ from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 from .base import BaseResourceAgent
 from .drafts import ExpandedQuizDraft
+from .cross_subject import quiz_resource, should_use_cross_subject
 
 
 class QuizAgent(BaseResourceAgent):
@@ -24,8 +26,9 @@ class QuizAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        subject = subject_context_from_profile(context.profile)
         system_prompt = (
-            "你是一位机器学习课程助教。只依据提供的课程知识库生成 8 至 12 道分层题。"
+            f"你是一位{subject.subject_name or '通识'}课程助教。根据当前学科和可用资料生成 8 至 12 道分层题。"
             "私有输出固定为 basic、intermediate、challenge 三个数组："
             "basic 包含 3 至 4 道基础单选题，每题必须有四个不重复选项、唯一答案和解析；"
             "intermediate 包含 3 至 5 道原理或应用简答题；"
@@ -33,7 +36,7 @@ class QuizAgent(BaseResourceAgent):
             "题目应覆盖定义、辨析、公式、流程、错误诊断、应用和结果解释，"
             "至少两题直接联系学生目标，题干之间不得只是改写。"
             "不要生成题目 ID、资源元数据、来源字段或 Markdown。"
-            "事实、术语和答案必须能够由课程知识库支持。"
+            f"题目必须符合 {subject.subject_family} 学科特点，事实、术语和答案必须与当前课程一致。"
         )
         user_content = (
             f"主题：{topic}\n"
@@ -71,6 +74,8 @@ class QuizAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        if should_use_cross_subject(context):
+            return quiz_resource(context, topic, difficulty, references)
         goal = "、".join(context.profile.learning_goals.value or ["完成当前学习任务"])
         weak = "、".join(context.profile.weak_topics.value or [topic])
         draft = ExpandedQuizDraft.model_validate(

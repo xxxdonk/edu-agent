@@ -89,7 +89,7 @@ def test_profile_contract_evidence_and_persistence(
     assert stored.json() == profile
 
 
-def test_system_default_course_has_explicit_evidence(client: TestClient) -> None:
+def test_unknown_course_never_falls_back_to_machine_learning(client: TestClient) -> None:
     response = client.post(
         "/api/profile/chat",
         json={
@@ -105,9 +105,8 @@ def test_system_default_course_has_explicit_evidence(client: TestClient) -> None
     )
     assert response.status_code == 200
     course = response.json()["profile"]["course"]
-    assert course["value"] == "机器学习基础"
-    assert course["confidence"] < 0.78
-    assert course["evidence"][0]["source"] == "system_default"
+    assert course["value"] != "机器学习基础"
+    assert all(evidence["source"] != "system_default" for evidence in course["evidence"])
 
 
 def test_missing_profile_returns_404(client: TestClient) -> None:

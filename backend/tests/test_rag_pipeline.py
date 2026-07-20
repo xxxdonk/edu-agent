@@ -73,7 +73,7 @@ def test_unrelated_topic_has_no_fabricated_reference() -> None:
     assert retriever.retrieve("量子烹饪星际航海") == []
 
 
-def test_resource_agent_fails_when_no_reliable_knowledge_source(tmp_path: Path) -> None:
+def test_resource_agent_transparently_uses_general_model_when_no_source(tmp_path: Path) -> None:
     events: list[dict] = []
 
     def emit_event(_task_id: str, **payload) -> None:
@@ -86,12 +86,13 @@ def test_resource_agent_fails_when_no_reliable_knowledge_source(tmp_path: Path) 
     )
     context = replace(_context(), emit_event=emit_event)
 
-    with pytest.raises(ValueError, match="没有可核验的主题依据"):
-        asyncio.run(agent.generate(context))
+    resource = asyncio.run(agent.generate(context))
 
-    assert [event["status"] for event in events] == ["started", "failed"]
+    assert resource.source_references[0].source_id == "general-model"
+    assert "本地知识库未命中" in resource.source_references[0].title
+    assert [event["status"] for event in events] == ["started", "completed"]
     assert all(event["agent"] == "retriever_agent" for event in events)
-    assert events[-1]["error"] == "no_reliable_knowledge_source"
+    assert events[-1]["error"] is None
 
 
 def test_resource_agent_emits_real_retrieval_started_and_completed_events() -> None:

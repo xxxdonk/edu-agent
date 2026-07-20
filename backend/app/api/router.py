@@ -63,15 +63,11 @@ def _planner_target_topics(profile: StudentProfile) -> list[str]:
 
     weak_topics = [str(topic).strip() for topic in profile.weak_topics.value or []]
     goals = [str(goal).strip() for goal in profile.learning_goals.value or []]
-    searchable = " ".join([*weak_topics, *goals])
-    targets: list[str] = []
-    if any(token in searchable for token in ("数学", "线性代数", "微积分", "导数")):
-        targets.append("数学基础（线性代数与微积分）")
-    if "梯度下降" in searchable:
-        targets.append("梯度下降")
-    targets.extend(weak_topics)
-    if "分类" in searchable and "项目" in searchable:
-        targets.append("分类项目实践")
+    targets = [*weak_topics]
+    if not targets:
+        targets.extend(goals[:2])
+    if not targets and profile.course.value:
+        targets.append(profile.course.value)
     return list(dict.fromkeys(target for target in targets if target))
 
 

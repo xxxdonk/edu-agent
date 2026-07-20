@@ -4,8 +4,10 @@ from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 from .base import BaseResourceAgent
+from .cross_subject import explanation_resource, should_use_cross_subject
 
 
 class ExplanationAgent(BaseResourceAgent):
@@ -22,12 +24,14 @@ class ExplanationAgent(BaseResourceAgent):
         references: list[SourceReference],
     ) -> Resource:
         profile = context.profile
+        subject = subject_context_from_profile(profile)
         system_prompt = (
-            "你是一位机器学习课程讲师。只依据学生画像和课程知识库生成完整 Markdown 讲解。"
+            f"你是一位{subject.subject_name or '通识'}课程讲师。根据学生画像和可用课程资料生成完整 Markdown 讲解。"
             "依次包含：学习目标、学习价值、前置回顾、核心概念、原理与闭合 LaTeX 公式、"
             "分步流程、贴合目标的完整示例、至少四个常见错误、至少三个自检问题、"
             "至少五组 FAQ、本节总结和下一步建议。"
-            "每个公式后解释变量含义；不要虚构结论、来源或统计数据。"
+            f"内容结构必须适合 {subject.subject_family} 学科；每个必要公式后解释变量含义，不需要公式的学科不得强行加入。"
+            "不要虚构结论、来源或统计数据；知识库为空时明确使用通用模型知识。"
             "初学者偏直观，考试目标突出公式与易错点，项目目标突出指标与调试。"
         )
         user_content = (
@@ -60,6 +64,8 @@ class ExplanationAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        if should_use_cross_subject(context):
+            return explanation_resource(context, topic, difficulty, references)
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
         goals = "、".join(context.profile.learning_goals.value or ["掌握当前主题"])

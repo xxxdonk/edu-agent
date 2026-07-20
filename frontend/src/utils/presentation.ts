@@ -274,6 +274,7 @@ export function buildResourcePackageSummary(
   const first = resources[0];
   const sources = new Set(
     resources.flatMap((resource) => resource.source_references)
+      .filter((source) => source.source_id !== 'general-model')
       .map((source) => `${source.source_id}|${source.locator}`),
   );
   const missingLabels = learningOrder
@@ -301,7 +302,7 @@ export function resourceFollowUpSuggestions(type: Resource['resource_type']): st
     mind_map: ['展开核心原理分支', '解释节点之间的关系', '转换为我的学习清单'],
     quiz: ['复习错题对应的知识点', '再出一组同难度练习', '解释容易误选的选项'],
     reading: ['给出推荐阅读顺序', '提炼关键术语表', '生成阅读检查清单'],
-    coding: ['逐步解释这段代码', '增加一个 TODO 练习', '如何排查运行错误', '如何用于客户流失项目'],
+    coding: ['逐步解释这项实践', '增加一个进阶练习', '如何检查实践结果', '如何迁移到新的应用任务'],
   }[type];
 }
 

@@ -24,6 +24,7 @@ from app.schemas.profile import (
     StudentProfile,
     TimeBudget,
 )
+from app.subjects import infer_subject_context, is_course_switch, stage_display
 from .models import ProfileExtractionDraft, _normalize_weak_topics
 from .prompts import PROFILE_SYSTEM_PROMPT
 
@@ -35,7 +36,7 @@ class DevelopmentProfileAgent:
 
     mode = "development_heuristic"
     _required_dimensions = (
-        "major",
+        "course",
         "knowledge_level",
         "learning_goals",
         "weak_topics",
@@ -50,6 +51,11 @@ class DevelopmentProfileAgent:
     ) -> ProfileChatResponse:
         user_messages = [message for message in request.messages if message.role == "user"]
         transcript = "\n".join(message.content for message in user_messages)
+        subject_context = infer_subject_context(transcript)
+        course_switched, _ = is_course_switch(
+            previous.course.value if previous else None,
+            transcript,
+        )
 
         major = self._first_group(
             transcript,
@@ -58,12 +64,15 @@ class DevelopmentProfileAgent:
                 r"我是\s*([^，。,.；;\n]{2,20})专业",
             ),
         )
+        major = major or stage_display(subject_context)
         course = self._first_group(
             transcript,
             (
                 r"(?:课程是|正在学习|正在学|想学习|想学|学习)\s*[《“\"]?([^》”\"，。,.；;\n]{2,30})",
             ),
         )
+        if subject_context.subject_name:
+            course = subject_context.subject_name
         level = self._extract_level(transcript)
         goals = self._extract_phrases(
             transcript,
@@ -99,16 +108,21 @@ class DevelopmentProfileAgent:
                 evidence_source="inference",
                 confidence=0.72,
             ),
-            learning_goals=self._list_field("learning_goals", goals, previous, user_messages),
+            learning_goals=self._list_field(
+                "learning_goals", goals, previous, user_messages,
+                preserve_previous=not course_switched,
+            ),
             weak_topics=self._list_field(
                 "weak_topics",
                 weak_topics,
                 previous,
                 user_messages,
                 extra_evidence=evaluation_evidence,
+                preserve_previous=not course_switched,
             ),
             learning_history=self._list_field(
-                "learning_history", history, previous, user_messages
+                "learning_history", history, previous, user_messages,
+                preserve_previous=not course_switched,
             ),
             cognitive_style=self._scalar_field(
                 "cognitive_style",
@@ -141,11 +155,13 @@ class DevelopmentProfileAgent:
             self._profile_evidence(user_messages, evaluation_evidence),
         )
         profile.confidence = self._overall_confidence(profile)
-        missing = self._missing_dimensions(profile)
+        missing = self._missing_dimensions(profile, subject_context)
         return ProfileChatResponse(
             profile=profile,
             missing_dimensions=missing,
-            next_question=self._next_question(missing[0]) if missing else None,
+            next_question=(
+                self._next_question(missing[0], subject_context) if missing else None
+            ),
             is_complete=not missing,
             extraction_mode=self.mode,
         )
@@ -276,16 +292,7 @@ class DevelopmentProfileAgent:
             return self._scalar_field("course", value, previous, messages)
         if previous:
             return previous.course.model_copy(deep=True)
-        return ProfileField(
-            value="机器学习基础",
-            evidence=[
-                FieldEvidence(
-                    source="system_default",
-                    quote="默认演示课程：《机器学习基础》",
-                )
-            ],
-            confidence=0.55,
-        )
+        return ProfileField(value=None, evidence=[], confidence=0.0)
 
     def _time_budget_field(
         self,
@@ -324,8 +331,9 @@ class DevelopmentProfileAgent:
         extra_evidence: list[FieldEvidence] | None = None,
         evidence_source: str = "conversation",
         confidence: float = 0.78,
+        preserve_previous: bool = True,
     ) -> ProfileField[list[str]]:
-        old = getattr(previous, name) if previous else None
+        old = getattr(previous, name) if previous and preserve_previous else None
         merged = self._merge_lists(old.value if old else [], values)
         if name == "weak_topics":
             merged = _normalize_weak_topics(merged)
@@ -422,12 +430,32 @@ class DevelopmentProfileAgent:
         ]
         return [*conversation, *evaluation_evidence]
 
-    def _missing_dimensions(self, profile: StudentProfile) -> list[str]:
+    def _missing_dimensions(
+        self,
+        profile: StudentProfile,
+        context=None,
+    ) -> list[str]:
         missing: list[str] = []
         for name in self._required_dimensions:
             field = getattr(profile, name)
             if field.value is None or field.value == [] or field.confidence < 0.5:
                 missing.append(name)
+        context = context or infer_subject_context(
+            " ".join(filter(None, [profile.major.value, profile.course.value]))
+        )
+        stage_needs_detail = (
+            context.education_stage == "high_school" and profile.major.value == "高中"
+        ) or (
+            context.education_stage == "middle_school" and profile.major.value == "初中"
+        ) or (
+            context.education_stage == "primary_school" and profile.major.value == "小学"
+        )
+        university_needs_major = context.education_stage in {
+            "undergraduate", "postgraduate"
+        } and not profile.major.value
+        if (stage_needs_detail or university_needs_major) and "major" not in missing:
+            insert_at = 1 if "course" in missing else 0
+            missing.insert(insert_at, "major")
         return missing
 
     @staticmethod
@@ -436,9 +464,17 @@ class DevelopmentProfileAgent:
         return round(sum(getattr(profile, name).confidence for name in names) / len(names), 3)
 
     @staticmethod
-    def _next_question(dimension: str) -> str:
+    def _next_question(dimension: str, context=None) -> str:
+        if dimension == "major" and context is not None:
+            if context.education_stage == "high_school":
+                return "你目前是高一、高二还是高三？"
+            if context.education_stage == "middle_school":
+                return "你目前是初一、初二还是初三？"
+            if context.education_stage == "primary_school":
+                return "你目前是小学几年级？"
         questions = {
-            "major": "你目前的专业或主要学习方向是什么？",
+            "course": "你目前最想学习哪门课程或哪项技能？",
+            "major": "你目前的学习阶段、专业或主要方向是什么？",
             "knowledge_level": "你之前接触过这门课程吗？可以举例说明目前的程度。",
             "learning_goals": "你希望通过这门课程具体达成什么目标？",
             "weak_topics": "目前哪些概念或题型让你最困惑？",
@@ -452,8 +488,13 @@ class ProfileAgent:
     """Structured LLM profile extraction with an explicit heuristic fallback."""
 
     _question_variants = {
+        "course": (
+            "你目前最想学习哪门课程或哪项技能？",
+            "这次希望重点学习的课程或主题是什么？",
+            "请告诉我一个具体学科、课程或技能名称。",
+        ),
         "major": (
-            "你目前的专业或主要学习方向是什么？",
+            "你目前的学习阶段、专业或主要方向是什么？",
             "方便说说你现在主修什么，或主要往哪个方向学习吗？",
             "为了匹配学习内容，我还需要了解你的专业或学习方向。",
         ),
@@ -484,7 +525,8 @@ class ProfileAgent:
         ),
     }
     _question_dimension_labels = {
-        "major": "专业或主要学习方向",
+        "course": "当前课程或学习主题",
+        "major": "学习阶段、专业或主要方向",
         "knowledge_level": "当前基础程度",
         "learning_goals": "具体学习目标",
         "weak_topics": "最需要补强的知识点",
@@ -500,7 +542,7 @@ class ProfileAgent:
             ),
         ),
         ("time_budget", (r"每天|每周|一周|分钟|小时|学习时间|投入.*时间|安排.*时间",)),
-        ("major", (r"专业|主修|学习方向|所在院系",)),
+        ("major", (r"专业|主修|学习方向|所在院系|高一|高二|高三|初一|初二|初三|几年级",)),
         ("learning_goals", (r"目标|达成|学完.*(?:能够|能)|成果|希望.*完成",)),
         (
             "cognitive_style",
@@ -794,18 +836,23 @@ class ProfileAgent:
         fields["weak_topics"].value = _normalize_weak_topics(
             fields["weak_topics"].value
         )
-
-        if fields["course"].value is None:
-            fields["course"] = ProfileField(
-                value="机器学习基础",
-                evidence=[
-                    FieldEvidence(
-                        source="system_default",
-                        quote="默认演示课程：《机器学习基础》",
-                    )
-                ],
-                confidence=0.55,
-            )
+        transcript = "\n".join(
+            message.content for message in request.messages if message.role == "user"
+        )
+        subject_context = infer_subject_context(
+            transcript,
+            current_course=fields["course"].value,
+        )
+        course_switched, switched_context = is_course_switch(
+            previous.course.value if previous else None,
+            transcript,
+        )
+        if course_switched:
+            current_only = self._fallback.extract(request, None).profile
+            fields["course"] = current_only.course.model_copy(deep=True)
+            for field_name in ("learning_goals", "weak_topics", "learning_history"):
+                fields[field_name] = getattr(current_only, field_name).model_copy(deep=True)
+            subject_context = switched_context
 
         profile = StudentProfile(
             student_id=request.student_id,
@@ -817,10 +864,12 @@ class ProfileAgent:
         )
         profile.evidence = DevelopmentProfileAgent._consolidated_evidence(profile, [])
         profile.confidence = DevelopmentProfileAgent._overall_confidence(profile)
-        missing = self._fallback._missing_dimensions(profile)
+        missing = self._fallback._missing_dimensions(profile, subject_context)
         next_question = None
         if missing:
-            next_question = draft.next_question or self._fallback._next_question(missing[0])
+            next_question = draft.next_question or self._fallback._next_question(
+                missing[0], subject_context
+            )
         return ProfileChatResponse(
             profile=profile,
             missing_dimensions=missing,

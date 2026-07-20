@@ -4,8 +4,10 @@ from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 from .base import BaseResourceAgent
+from .cross_subject import practice_resource, should_use_cross_subject
 
 
 class CodingAgent(BaseResourceAgent):
@@ -21,12 +23,16 @@ class CodingAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        subject = subject_context_from_profile(context.profile)
+        is_computational = subject.subject_family in {
+            "computer_science", "mathematics", "natural_science", "engineering"
+        }
         system_prompt = (
-            "你是一位机器学习工程师。只依据课程知识库生成可独立运行的 Python 小实验。"
-            "必须包含实验目标、现有 Python 环境、输入数据、3 至 6 个步骤、完整代码、"
-            "预期输出、至少 3 个 TODO 练习、4 个调试提示、2 个进阶挑战和 3 个反思问题。"
-            "优先围绕学生项目目标；只使用 Python 标准库，不访问外网、不安装依赖，"
-            "不使用绝对路径、密钥、危险系统命令或删除操作，不虚构真实模型准确率。"
+            f"你是一位{subject.subject_name or '通识'}课程实践导师。"
+            + ("生成可独立运行的计算或实验实践。" if is_computational else "生成不含无意义代码的应用实践任务。")
+            + "必须包含实践目标、准备条件、3 至 6 个步骤、预期产出、自评或调试提示和进阶挑战。"
+            + "优先围绕学生目标；需要代码时只使用 Python 标准库，不访问外网、不安装依赖，"
+            + "不使用绝对路径、密钥、危险系统命令或删除操作，不虚构实验结果。"
         )
         user_content = (
             f"主题：{topic}\n"
@@ -56,6 +62,8 @@ class CodingAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        if should_use_cross_subject(context):
+            return practice_resource(context, topic, difficulty, references)
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
 
@@ -175,7 +183,7 @@ print(f"准确率={accuracy:.3f}, 精确率={precision:.3f}, 召回率={recall:.
             resource_type=ResourceType.CODING,
             title=draft.title or f"{topic} Python 代码实践",
             content=draft.content,
-            content_format="python",
+            content_format=draft.content_format,
             target_topic=topic,
             difficulty=draft.difficulty or Difficulty(difficulty),
             personalization_reason=draft.personalization_reason or self._personalization_reason(context),

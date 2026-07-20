@@ -135,7 +135,7 @@ const pathRows = computed(() => pathDiff(props.previousPath, props.path));
 const changeSummary = computed(() => evaluationChangeSummary(
   props.previousProfile, props.profile, props.previousPath, props.path, props.result,
 ));
-const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用代码实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与代码资源后再次练习。`);
+const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用应用实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与实践资源后再次练习。`);
 
 watch(quizFingerprint, () => {
   Object.keys(answers).forEach((key) => delete answers[key]);

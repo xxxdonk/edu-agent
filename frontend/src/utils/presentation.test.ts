@@ -136,7 +136,7 @@ describe('demo and evaluation presentation', () => {
   });
 
   it('provides resource-specific follow-ups without sending anything', () => {
-    expect(resourceFollowUpSuggestions('coding')).toContain('如何用于客户流失项目');
+    expect(resourceFollowUpSuggestions('coding')).toContain('如何迁移到新的应用任务');
     expect(resourceFollowUpSuggestions('mind_map')).toHaveLength(3);
   });
 

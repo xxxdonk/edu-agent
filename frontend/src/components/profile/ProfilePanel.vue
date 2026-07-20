@@ -76,7 +76,7 @@ const evidenceSourceLabel: Record<EvidenceSource, string> = {
   conversation: '对话原文', evaluation: '学习评价', inference: '模型推断', system_default: '系统默认',
 };
 const labels: Record<string, string> = {
-  major: '专业', course: '当前课程', knowledge_level: '知识水平', learning_goals: '学习目标',
+  major: '学习阶段/专业', course: '当前课程', knowledge_level: '知识水平', learning_goals: '学习目标',
   weak_topics: '薄弱知识点', learning_history: '学习历史', cognitive_style: '认知风格',
   language_preference: '语言偏好', resource_preference: '资源偏好', time_budget: '可用学习时间',
 };

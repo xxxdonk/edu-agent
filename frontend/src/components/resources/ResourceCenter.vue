@@ -30,7 +30,7 @@
       </dl>
       <div class="learning-sequence" aria-label="推荐学习顺序">
         <span v-for="(label, index) in packageSummary.recommendedOrder" :key="label" :class="{'is-ready': index < packageSummary.completed}">
-          <b>{{ index + 1 }}</b>{{ label }}
+          <b>{{ index + 1 }}</b>{{ label === '代码实践' ? practiceLabel : label }}
         </span>
       </div>
       <StatusBanner
@@ -63,9 +63,9 @@
         >
           <component :is="resourceIcon(resource.resource_type)" />
           <span class="resource-nav-card__copy">
-            <small>{{ typeLabel[resource.resource_type] }}</small>
+            <small>{{ typeLabelFor(resource) }}</small>
             <strong>{{ resource.title }}</strong>
-            <em>{{ resource.target_topic }} · {{ resource.source_references.length }} 个来源</em>
+            <em>{{ resource.target_topic }} · {{ actualRagSources(resource.source_references).length }} 个本地来源</em>
           </span>
           <span class="resource-nav-card__status">
             <el-tag size="small" type="success" effect="plain">已生成</el-tag>
@@ -75,7 +75,7 @@
       </nav>
       <article v-if="selectedResource" class="resource-detail">
         <div class="resource-heading">
-          <div><p>{{ typeLabel[selectedResource.resource_type] }}</p><h3>{{ selectedResource.title }}</h3></div>
+          <div><p>{{ typeLabelFor(selectedResource) }}</p><h3>{{ selectedResource.title }}</h3></div>
           <div class="resource-heading__tags">
             <el-tag>{{ difficultyLabel[selectedResource.difficulty] }}</el-tag>
             <el-tag :type="reviewType(selectedResource.review_status)" effect="plain">{{ reviewLabel[selectedResource.review_status] }}</el-tag>
@@ -84,7 +84,7 @@
         <dl class="resource-metadata">
           <div><dt>目标知识点</dt><dd>{{ selectedResource.target_topic }}</dd></div>
           <div><dt>个性化原因</dt><dd>{{ selectedResource.personalization_reason }}</dd></div>
-          <div><dt>内容来源</dt><dd>{{ selectedResource.source_references.length }} 项 · {{ formatSourceTitles(selectedResource.source_references) }}</dd></div>
+          <div><dt>内容来源</dt><dd>{{ sourceDescription }}</dd></div>
           <div><dt>审校状态</dt><dd>{{ reviewLabel[selectedResource.review_status] }}</dd></div>
           <div><dt>生成状态</dt><dd>已生成</dd></div>
           <div><dt>创建时间</dt><dd>{{ formatDate(selectedResource.created_at) }}</dd></div>
@@ -98,9 +98,14 @@
           status="partial"
           message="该资源由本地规则降级生成，已明确保留来源与 Reviewer 状态。"
         />
-        <el-collapse class="source-collapse">
+        <StatusBanner
+          v-if="usesGeneralModel(selectedResource.source_references)"
+          status="partial"
+          message="未命中本地课程资料，使用通用模型或学科规则生成。"
+        />
+        <el-collapse v-if="selectedActualSources.length" class="source-collapse">
           <el-collapse-item title="查看知识库来源与定位">
-            <div v-for="source in selectedResource.source_references" :key="`${source.source_id}-${source.locator}`" class="source-row">
+            <div v-for="source in selectedActualSources" :key="`${source.source_id}-${source.locator}`" class="source-row">
               <strong>{{ source.title }}</strong><code>{{ source.locator }}</code><span v-if="source.chunk_id">{{ source.chunk_id }}</span>
             </div>
           </el-collapse-item>
@@ -136,6 +141,7 @@ import StatusBanner from '@/components/common/StatusBanner.vue';
 import type {Difficulty, EvaluationResult, LearningPath, Resource, ResourceType, ReviewStatus, StudentProfile, TaskState, ViewStatus} from '@/types/api';
 import {formatSourceTitles} from '@/utils/content';
 import {buildResourcePackageSummary, profilePersonalizationEvidence, resourceFollowUpSuggestions, safeFailureMessage} from '@/utils/presentation';
+import {actualRagSources, practiceDisplayName, profileCourse, resourceDisplayName, usesGeneralModel} from '@/utils/subject';
 
 const props = defineProps<{
   resources: Resource[]; failures: string[]; status: ViewStatus; canGenerate: boolean;
@@ -150,11 +156,17 @@ const selectedResource = computed(() => sortedResources.value.find((item) => ite
 const packageSummary = computed(() => buildResourcePackageSummary(props.resources, props.path, props.selectedStep, props.task, props.evaluation));
 const packageDifficulty = computed(() => difficultyLabel[packageSummary.value.difficulty as Difficulty] ?? packageSummary.value.difficulty);
 const personalizationEvidence = computed(() => profilePersonalizationEvidence(props.profile));
+const currentCourse = computed(() => profileCourse(props.profile));
+const practiceLabel = computed(() => practiceDisplayName(currentCourse.value));
+const selectedActualSources = computed(() => actualRagSources(selectedResource.value?.source_references ?? []));
+const sourceDescription = computed(() => selectedActualSources.value.length
+  ? `${selectedActualSources.value.length} 项 · ${formatSourceTitles(selectedActualSources.value)}`
+  : '未命中本地课程资料，使用通用模型');
 const followUpSuggestions = computed(() => selectedResource.value ? resourceFollowUpSuggestions(selectedResource.value.resource_type) : []);
 const isDevelopmentFallback = computed(() => selectedResource.value?.personalization_reason.toLowerCase().includes('development fallback') ?? false);
 watch(() => props.resources, (resources) => { if (!resources.some((item) => item.resource_id === selectedId.value)) selectedId.value = resources[0]?.resource_id ?? ''; }, {immediate: true});
 
-const typeLabel: Record<ResourceType, string> = {explanation: 'Markdown 课程讲解', mind_map: 'Mermaid 思维导图', quiz: '分层练习题', reading: '拓展阅读', coding: 'Python 代码实践'};
+function typeLabelFor(resource: Resource) { return resourceDisplayName(resource, currentCourse.value); }
 const reviewLabel: Record<ReviewStatus, string> = {pending: '待审校', approved: '审校通过', rejected: '未通过', needs_revision: '需修改'};
 const difficultyLabel: Record<Difficulty, string> = {beginner: '入门', intermediate: '中级', advanced: '高级'};
 function reviewType(status: ReviewStatus) { return ({pending: 'info', approved: 'success', rejected: 'danger', needs_revision: 'warning'} as const)[status]; }

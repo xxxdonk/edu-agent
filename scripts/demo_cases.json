@@ -2,46 +2,46 @@
   "cases": [
     {
       "id": "visual_beginner",
-      "name": "A. 初学视觉型学生",
-      "input": "我是计算机科学专业大一学生，刚开始学习机器学习，线性代数基础和梯度下降都很薄弱，希望看懂基础分类模型。每天可以学习45分钟，偏好图示、思维导图和生活类比。",
+      "name": "A. 高中数学基础型学生",
+      "input": "我是高二学生，正在学习高中数学，函数和数列基础较弱，目标是提高期末考试成绩。我每天能学习45分钟，喜欢图示、例题和分步骤讲解。",
       "expected_profile": {
-        "major_any": ["计算机"],
-        "course_any": ["机器学习"],
-        "knowledge_level": ["beginner"],
+        "major_any": ["高中", "高二"],
+        "course_any": ["高中数学"],
+        "knowledge_level": ["beginner", "intermediate"],
         "time_budget_minutes": 45,
-        "goal_any": ["分类"],
-        "weak_topic_groups": [["线性代数", "数学基础"], ["梯度下降"]],
+        "goal_any": ["期末", "成绩"],
+        "weak_topic_groups": [["函数"], ["数列"]],
         "preference_any": ["思维导图", "图示", "visual"]
       },
       "expected_path": {
-        "priority_any": ["线性代数", "数学", "梯度下降"],
-        "eventual_any": ["分类"]
+        "priority_any": ["函数", "数列", "数学"],
+        "eventual_any": ["练习", "错题", "应用"]
       },
-      "expected_resource_difference": "讲解和思维导图应先提供直观图示、概念关系与生活类比，再进入公式和分类模型。",
+      "expected_resource_difference": "讲解和思维导图应围绕高中数学概念、公式、例题与易错点，实践资源可使用计算验证但不得出现机器学习默认内容。",
       "quiz_submission": {
         "strategy": "all_wrong",
         "time_spent_minutes": 8
       },
-      "expected_after_evaluation": "画像新增 evaluation 证据并继续保留数学基础、梯度下降为薄弱点；新路径优先复习基础概念。"
+      "expected_after_evaluation": "画像新增 evaluation 证据并继续保留函数、数列为薄弱点；新路径优先复习错题与基础概念。"
     },
     {
       "id": "exam_oriented",
-      "name": "B. 考试型学生",
-      "input": "我是数据科学专业大三学生，正在复习机器学习期末考试，已经学过回归和分类，但模型评估、过拟合和正则化容易混淆。目标是考试达到85分，每天可以学习60分钟，偏好分层练习、公式总结和错题解析。",
+      "name": "B. 大学英语考试型学生",
+      "input": "我是大学生，准备大学英语考试，阅读理解和写作较弱，希望进行阶段复习。我每天能学习60分钟，喜欢词汇清单、阅读练习和错题分析。",
       "expected_profile": {
-        "major_any": ["数据科学"],
-        "course_any": ["机器学习"],
-        "knowledge_level": ["intermediate", "advanced"],
+        "major_any": ["大学", "本科"],
+        "course_any": ["大学英语"],
+        "knowledge_level": ["beginner", "intermediate", "advanced"],
         "time_budget_minutes": 60,
-        "goal_any": ["考试", "85"],
-        "weak_topic_groups": [["模型评估"], ["过拟合"], ["正则化"]],
-        "preference_any": ["练习", "题目", "practice"]
+        "goal_any": ["考试", "复习"],
+        "weak_topic_groups": [["阅读"], ["写作"]],
+        "preference_any": ["阅读", "练习", "错题"]
       },
       "expected_path": {
-        "priority_any": ["模型评估", "过拟合", "正则化"],
-        "eventual_any": ["考试", "练习", "综合"]
+        "priority_any": ["阅读", "写作", "英语"],
+        "eventual_any": ["词汇", "表达", "练习"]
       },
-      "expected_resource_difference": "Quiz 和讲解应突出模型评估、过拟合、正则化的辨析、公式与分层练习。",
+      "expected_resource_difference": "Quiz 和讲解应覆盖大学英语词汇、阅读、写作与纠错，coding 类型显示为应用实践任务且不强制 Python。",
       "quiz_submission": {
         "strategy": "alternating",
         "time_spent_minutes": 12

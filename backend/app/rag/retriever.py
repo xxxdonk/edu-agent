@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from app.schemas import SourceReference
+from app.subjects import is_machine_learning_subject
 
 from .loader import DocumentChunk, load_knowledge_base
 
@@ -76,15 +77,20 @@ class KnowledgeRetriever:
         topic: str,
         max_chunks: int = 5,
         difficulty: str | None = None,
+        subject_name: str | None = None,
+        learning_goal: str | None = None,
     ) -> list[tuple[DocumentChunk, float]]:
         self._ensure_loaded()
         if not self._chunks:
             return []
+        if subject_name and not is_machine_learning_subject(subject_name):
+            return []
 
-        query_terms = self._tokenize(topic)
+        query = " ".join(filter(None, [subject_name, topic, learning_goal]))
+        query_terms = self._tokenize(query)
         scored: list[tuple[DocumentChunk, float]] = []
         for chunk in self._chunks:
-            score = self._score(chunk, query_terms, topic, difficulty)
+            score = self._score(chunk, query_terms, query, difficulty)
             if score > 0:
                 scored.append((chunk, score))
 

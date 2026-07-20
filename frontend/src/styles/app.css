@@ -118,6 +118,8 @@ button:focus-visible, [role="button"]:focus-visible, a:focus-visible, .el-input_
 .demo-case-picker button { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; min-height: 30px; padding: 5px 9px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--ink-soft); background: var(--surface); cursor: pointer; font-size: 12px; }
 .demo-case-picker button:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-soft); }
 .demo-case-picker button strong { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: #fff; background: var(--blue); font-size: 10px; }
+.subject-example-picker { display: grid; grid-template-columns: auto minmax(190px, 1fr); align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 12px; font-weight: 700; }
+.subject-example-picker .el-select { width: 100%; }
 .composer { display: grid; grid-template-columns: 1fr 86px; gap: 8px; align-items: end; }
 .composer .el-button { height: 74px; }
 
@@ -353,6 +355,7 @@ button:focus-visible, [role="button"]:focus-visible, a:focus-visible, .el-input_
   .is-demo-mode .conversation-panel { height: calc(100vh - 270px); min-height: 430px; }
   .message-list { min-height: 140px; }
   .prompt-suggestions { padding-block: 6px; }
+  .subject-example-picker { grid-template-columns: 1fr; gap: 5px; }
 }
 
 @media (max-width: 1100px) {

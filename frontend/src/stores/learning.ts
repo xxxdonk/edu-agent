@@ -47,7 +47,7 @@ const traceTemplate: UiAgentTrace[] = [
   {key: 'mind_map_agent', name: 'MindMap Agent', label: '正在生成思维导图', status: 'waiting', message: '等待编排', progress: 0},
   {key: 'quiz_agent', name: 'Quiz Agent', label: '正在生成练习题', status: 'waiting', message: '等待编排', progress: 0},
   {key: 'reading_agent', name: 'Reading Agent', label: '正在生成拓展阅读', status: 'waiting', message: '等待编排', progress: 0},
-  {key: 'coding_agent', name: 'Coding Agent', label: '正在生成代码案例', status: 'waiting', message: '等待编排', progress: 0},
+  {key: 'coding_agent', name: 'Coding Agent', label: '正在生成实践任务', status: 'waiting', message: '等待编排', progress: 0},
   {key: 'reviewer_agent', name: 'Reviewer Agent', label: '正在审校', status: 'waiting', message: '等待资源生成', progress: 0},
   {key: 'system', name: 'Orchestrator', label: '已完成', status: 'waiting', message: '等待任务完成', progress: 0},
 ];
@@ -76,7 +76,7 @@ function normalizeStatus(status: string): UiAgentStatus {
 }
 
 export const useLearningStore = defineStore('learning', () => {
-  const studentId = ref('demo-student-001');
+  const studentId = ref(import.meta.env.MODE === 'test' ? 'demo-student-001' : id('student'));
   const conversationId = ref(id('conversation'));
   const composerDraft = ref('');
   const demoMode = ref(false);
@@ -84,7 +84,7 @@ export const useLearningStore = defineStore('learning', () => {
     {
       message_id: id('assistant'),
       role: 'assistant',
-      content: '你好，我会通过对话了解你的学习情况。可以告诉我你的专业、正在学习的课程、薄弱点、目标和每周可用时间。',
+      content: '你好，我会通过对话了解你的学习阶段、课程、薄弱点、目标和可用时间。可以先说说你现在最想学什么。',
     },
   ]);
   const profile = ref<StudentProfile | null>(null);
@@ -597,6 +597,8 @@ export const useLearningStore = defineStore('learning', () => {
     task.value = null;
     taskEvents.value = [];
     evaluation.value = null;
+    selectedStep.value = 1;
+    apiIssues.value = [];
     traces.value = traceTemplate.map((item) => ({...item}));
     profileStatus.value = pathStatus.value = resourceStatus.value = evaluationStatus.value = 'idle';
     sseConnectionStatus.value = 'idle';

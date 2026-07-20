@@ -6,9 +6,11 @@ from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 from .base import BaseResourceAgent
 from .drafts import ReadingDraft
+from .cross_subject import reading_resource, should_use_cross_subject
 
 
 class ReadingAgent(BaseResourceAgent):
@@ -24,14 +26,16 @@ class ReadingAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        subject = subject_context_from_profile(context.profile)
         system_prompt = (
-            "你是一位机器学习课程研究助理。只依据课程知识库生成分层拓展阅读。"
+            f"你是一位{subject.subject_name or '通识'}课程研究助理。根据当前学科和可用资料生成分层拓展阅读。"
             "私有输出固定为 objective、quick_read、deep_read、project_route、glossary、"
             "check_questions、recommended_practice。project_route 为 3 至 6 步阅读路线，"
             "glossary 为 8 至 12 个“术语：解释”，check_questions 为 5 至 8 个检查问题。"
             "quick_read 提炼十分钟可掌握的背景与结论，deep_read 展开原理、方法和应用。"
             "不要输出 Markdown 标题、资源元数据、来源字段或外部 URL，"
-            "也不要虚构论文、统计数据或知识库未提供的事实。"
+            f"阅读结构必须适合 {subject.subject_family} 学科，不得复制讲解正文。"
+            "也不要虚构论文、统计数据、链接或无法核验的事实。"
             "避免复述课程讲解，重点放在延伸联系、阅读顺序和带问题阅读。"
         )
         user_content = (
@@ -67,6 +71,8 @@ class ReadingAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        if should_use_cross_subject(context):
+            return reading_resource(context, topic, difficulty, references)
         draft = ReadingDraft(
             objective=(
                 f"沿课程来源建立{topic}的延伸阅读路线，并把概念、实验判断与项目决策连接起来。"

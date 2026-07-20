@@ -16,11 +16,11 @@ from .contracts import SharedAgentContext
 
 
 _GENERATOR_REVISIONS: dict[ResourceType, str] = {
-    ResourceType.EXPLANATION: "explanation-content-depth-v2",
-    ResourceType.MIND_MAP: "mind-map-content-depth-v2",
-    ResourceType.QUIZ: "quiz-content-depth-v2",
-    ResourceType.READING: "reading-content-depth-v2",
-    ResourceType.CODING: "coding-content-depth-v2",
+    ResourceType.EXPLANATION: "explanation-cross-subject-v3",
+    ResourceType.MIND_MAP: "mind-map-cross-subject-v3",
+    ResourceType.QUIZ: "quiz-cross-subject-v3",
+    ResourceType.READING: "reading-cross-subject-v3",
+    ResourceType.CODING: "practice-cross-subject-v3",
 }
 
 

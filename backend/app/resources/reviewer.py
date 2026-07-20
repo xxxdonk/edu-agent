@@ -10,6 +10,14 @@ import textwrap
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType
 from app.guardrails.checker import GuardrailChecker
+from app.subjects import is_machine_learning_subject, subject_context_from_profile
+from .cross_subject import (
+    explanation_resource,
+    mind_map_resource,
+    practice_resource,
+    quiz_resource,
+    reading_resource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,18 @@ class ReviewerAgent:
         self._check_code_executability(resource, issues)
         self._check_quiz_consistency(resource, issues)
         self._check_resource_quality(resource, issues)
+        self._check_subject_consistency(resource, context, issues)
+        if (
+            any(issue.startswith("subject_mismatch") for issue in issues)
+            and "subject_mismatch_repaired_once" not in resource.personalization_reason
+        ):
+            repaired = self._repair_subject_mismatch(resource, context)
+            logger.info(
+                "review_subject_repair resource_id=%s resource_type=%s",
+                resource.resource_id,
+                resource.resource_type.value,
+            )
+            return await self.review(repaired, context)
 
         # Guardrail 检查
         guardrail_ok, guardrail_issues = GuardrailChecker.check(resource)
@@ -98,6 +118,8 @@ class ReviewerAgent:
             issues.append("缺少知识库来源引用")
             return
         for ref in resource.source_references:
+            if ref.source_id == "general-model":
+                continue
             if not ref.source_id or not ref.locator:
                 issues.append(f"来源引用不完整：source_id={ref.source_id}")
                 return
@@ -244,6 +266,8 @@ class ReviewerAgent:
             elif in_block:
                 block_lines.append(line)
 
+        if not code_blocks and resource.content_format != "python":
+            return
         if not code_blocks:
             # 尝试将全部内容作为代码解析
             code_blocks = [content]
@@ -346,6 +370,59 @@ class ReviewerAgent:
             cls._check_coding_quality(resource, issues)
 
     @staticmethod
+    def _check_subject_consistency(
+        resource: Resource,
+        context: SharedAgentContext,
+        issues: list[str],
+    ) -> None:
+        subject = subject_context_from_profile(context.profile)
+        course = subject.subject_name
+        searchable = " ".join(
+            [resource.title, resource.target_topic, resource.content[:12000]]
+        )
+        if course and course not in searchable and resource.target_topic not in searchable:
+            issues.append("subject_mismatch：资源未体现当前课程")
+        if not is_machine_learning_subject(course):
+            leakage = [
+                term for term in ("机器学习基础", "逻辑回归", "客户流失", "模型训练", "sklearn")
+                if term.casefold() in searchable.casefold()
+            ]
+            if leakage:
+                issues.append(f"subject_mismatch：出现无关学科内容 {'、'.join(leakage)}")
+            if any(ref.source_id.startswith("ml-") for ref in resource.source_references):
+                issues.append("subject_mismatch：本地来源与当前课程不一致")
+        if subject.education_stage in {"primary_school", "middle_school", "high_school"}:
+            unsuitable = [term for term in ("工程部署", "专业研究") if term in searchable]
+            if unsuitable:
+                issues.append(f"学段难度不匹配：{'、'.join(unsuitable)}")
+
+    @staticmethod
+    def _repair_subject_mismatch(
+        resource: Resource,
+        context: SharedAgentContext,
+    ) -> Resource:
+        generators = {
+            ResourceType.EXPLANATION: explanation_resource,
+            ResourceType.MIND_MAP: mind_map_resource,
+            ResourceType.QUIZ: quiz_resource,
+            ResourceType.READING: reading_resource,
+            ResourceType.CODING: practice_resource,
+        }
+        repaired = generators[resource.resource_type](
+            context,
+            resource.target_topic,
+            resource.difficulty.value,
+            resource.source_references,
+        )
+        return repaired.model_copy(
+            update={
+                "personalization_reason": (
+                    f"{repaired.personalization_reason}；subject_mismatch_repaired_once"
+                )[:2000]
+            }
+        )
+
+    @staticmethod
     def _missing_sections(content: str, labels: tuple[str, ...]) -> list[str]:
         return [label for label in labels if label not in content]
 
@@ -400,6 +477,14 @@ class ReviewerAgent:
 
     @classmethod
     def _check_coding_quality(cls, resource: Resource, issues: list[str]) -> None:
+        if resource.content_format == "markdown" and "```python" not in resource.content:
+            required = (
+                "任务目标", "准备材料", "分步骤任务", "产出要求", "自评清单", "进阶挑战",
+            )
+            missing = cls._missing_sections(resource.content, required)
+            if missing:
+                issues.append(f"应用实践任务缺少结构：{'、'.join(missing)}")
+            return
         required = (
             "实验目标", "环境说明", "输入数据", "分步骤任务", "完整 Python 代码",
             "预期输出", "TODO 练习", "调试提示", "进阶挑战", "反思问题",
@@ -426,7 +511,7 @@ class ReviewerAgent:
 
         valid_refs = [
             ref for ref in resource.source_references
-            if ref.source_id and ref.locator
+            if ref.source_id and ref.locator and ref.source_id != "general-model"
         ]
         if not valid_refs:
             return 0.2
