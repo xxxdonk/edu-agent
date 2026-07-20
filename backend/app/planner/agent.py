@@ -17,6 +17,7 @@ from app.llm import (
 from app.llm.errors import safe_error_summary
 from app.schemas import LearningPath, LearningPathStep, ResourceType, StudentProfile
 from app.schemas.common import Difficulty, utc_now
+from app.subjects import SubjectContext, subject_context_from_profile
 from .models import (
     LearningPathDraft,
     PLANNER_RESOURCE_TYPE_VALUES,
@@ -38,11 +39,12 @@ class DevelopmentPlannerAgent:
         previous_path_id: str | None = None,
         evaluation_summary: str | None = None,
     ) -> LearningPath:
-        topics = self._topics(profile)
+        subject = subject_context_from_profile(profile)
+        topics = self._topics(profile, subject)
         minutes = self._minutes_per_step(profile)
         resources = self._resource_order(profile)
-        major = profile.major.value or "当前专业"
         level = profile.knowledge_level.value or Difficulty.BEGINNER
+        course = subject.subject_name or "当前学习主题"
 
         steps: list[LearningPathStep] = []
         for index, topic in enumerate(topics, start=1):
@@ -52,7 +54,7 @@ class DevelopmentPlannerAgent:
                 LearningPathStep(
                     step=index,
                     topic=topic,
-                    learning_goal=f"掌握{topic}并能在{major}相关情境中解释或应用",
+                    learning_goal=self._learning_goal(subject, topic),
                     reason=self._reason(profile, topic, index, evaluation_summary),
                     recommended_resources=resources,
                     completion_criteria=criteria,
@@ -65,7 +67,7 @@ class DevelopmentPlannerAgent:
             path_id=str(uuid4()),
             student_id=profile.student_id,
             profile_version=profile.version,
-            course=profile.course.value or "机器学习基础",
+            course=course,
             steps=steps,
             adjustment_reason=(
                 f"根据评价结果调整：{evaluation_summary[:200]}"
@@ -77,7 +79,7 @@ class DevelopmentPlannerAgent:
         )
 
     @staticmethod
-    def _topics(profile: StudentProfile) -> list[str]:
+    def _topics(profile: StudentProfile, subject: SubjectContext) -> list[str]:
         topics = [
             cleaned
             for item in profile.weak_topics.value
@@ -85,19 +87,65 @@ class DevelopmentPlannerAgent:
         ]
         for goal in profile.learning_goals.value:
             topic = _clean_topic_label(DevelopmentPlannerAgent._goal_topic(goal))
-            if topic not in topics:
+            if topic and topic not in topics:
                 topics.append(topic)
-        if not topics:
-            topics = [profile.course.value or "机器学习基础"]
-        return topics[:5]
+        course = subject.subject_name or "当前学习主题"
+        max_steps = 4 if subject.time_budget and subject.time_budget <= 30 else 6
+        is_exam = bool(subject.exam_or_project) and any(
+            token in subject.exam_or_project
+            for token in ("考试", "期末", "高考", "中考", "四级", "六级")
+        )
+        if len(topics) >= 3 and not is_exam:
+            return list(dict.fromkeys(topics))[:max_steps]
+        progressions: dict[str, list[str]] = {
+            "mathematics": ["概念理解", "公式与性质", "典型例题", "分层练习", "错题整理", "综合应用"],
+            "natural_science": ["现象与概念", "规律和公式", "实验或数据", "典型问题", "常见误区", "综合应用"],
+            "language": ["基础知识与词汇", "语法与表达", "阅读理解", "输出练习", "纠错复盘", "综合运用"],
+            "social_science": ["基本概念", "时间线与框架", "原因与影响", "材料分析", "观点比较", "答题表达"],
+            "computer_science": ["核心概念", "工作原理", "示例分析", "代码实践", "调试方法", "项目实践"],
+            "engineering": ["基础理论", "数学模型", "系统结构", "分析方法", "实验或设计", "工程应用"],
+            "arts": ["基础元素", "作品分析", "核心技法", "模仿练习", "创作任务", "自我评价"],
+            "business_economics": ["基本概念", "分析框架", "案例理解", "数据或材料分析", "决策应用", "复盘评价"],
+            "unknown": ["目标澄清", "基础概念", "核心方法", "示例分析", "练习巩固", "学习评价"],
+        }
+        family_steps = progressions.get(subject.subject_family, progressions["unknown"])
+        progression_limit = max_steps - 1 if is_exam else max_steps
+        for label in family_steps:
+            if len(topics) >= progression_limit:
+                break
+            candidate = f"{course}：{label}"
+            if candidate not in topics:
+                topics.append(candidate)
+        if is_exam:
+            topics.append(f"{course}：错题复盘与模拟练习")
+        return list(dict.fromkeys(topics))[:max_steps]
+
+    @staticmethod
+    def _learning_goal(subject: SubjectContext, topic: str) -> str:
+        course = subject.subject_name or "当前学习主题"
+        action = {
+            "language": "理解并准确表达",
+            "mathematics": "理解、推导并独立解题",
+            "natural_science": "解释规律并完成典型问题",
+            "social_science": "建立框架并完成材料分析",
+            "computer_science": "说明原理并完成可验证实践",
+            "engineering": "建立模型并完成分析或设计",
+            "arts": "分析技法并完成创作练习",
+        }.get(subject.subject_family, "理解并应用")
+        return f"围绕{course}{action}{topic}，达到可检查的完成标准"
 
     @staticmethod
     def _goal_topic(goal: str) -> str:
-        topic = goal.strip()
+        topic = re.split(r"[，,。；;]", goal.strip(), maxsplit=1)[0].strip()
         for prefix in ("目标是", "我想", "想要", "希望", "最后能", "为了"):
             if topic.startswith(prefix):
                 topic = topic[len(prefix) :].strip()
                 break
+        if any(
+            marker in topic
+            for marker in ("考试", "提高成绩", "提升成绩", "阶段复习")
+        ):
+            return ""
         for prefix in ("理解", "掌握", "学会"):
             if topic.startswith(prefix):
                 return topic[len(prefix) :].strip()
@@ -139,7 +187,7 @@ class DevelopmentPlannerAgent:
     def _criteria(topic: str, level: Difficulty) -> list[str]:
         criteria = [f"能用自己的语言解释{topic}", "相关练习正确率达到80%"]
         if level != Difficulty.BEGINNER:
-            criteria.append(f"能完成一个与{topic}相关的代码或案例分析")
+            criteria.append(f"能完成一个与{topic}相关的应用或案例分析")
         return criteria
 
     @staticmethod
@@ -218,7 +266,7 @@ class PlannerAgent:
                 path_id=str(uuid4()),
                 student_id=profile.student_id,
                 profile_version=profile.version,
-                course=profile.course.value or "机器学习基础",
+                course=profile.course.value or "当前学习主题",
                 steps=[
                     LearningPathStep.model_validate(step.model_dump(mode="json"))
                     for step in draft.steps
@@ -351,6 +399,7 @@ class PlannerAgent:
 
     @staticmethod
     def _profile_summary(profile: StudentProfile) -> dict[str, object]:
+        subject = subject_context_from_profile(profile)
         return {
             "major": profile.major.value,
             "course": profile.course.value,
@@ -364,6 +413,14 @@ class PlannerAgent:
                 if profile.time_budget.value
                 else 45
             ),
+            "subject_context": {
+                "education_stage": subject.education_stage,
+                "subject_name": subject.subject_name or "当前学习主题",
+                "subject_family": subject.subject_family,
+                "grade_or_level": subject.grade_or_level,
+                "topic": subject.topic,
+                "exam_or_project": subject.exam_or_project,
+            },
         }
 
     @staticmethod

@@ -6,9 +6,11 @@ from app.llm import LLMMessage
 from app.orchestrator import SharedAgentContext
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 from .base import BaseResourceAgent, ResourceDraftFormatError
 from .drafts import MindMapDraft
+from .cross_subject import mind_map_resource, should_use_cross_subject
 
 
 class MindMapAgent(BaseResourceAgent):
@@ -24,12 +26,16 @@ class MindMapAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        subject = subject_context_from_profile(context.profile)
         system_prompt = (
-            "你是一位机器学习知识图谱专家。只依据课程知识库生成 Mermaid mindmap。"
+            f"你是一位{subject.subject_name or '通识'}知识结构专家。根据当前学科生成 Mermaid mindmap。"
             "私有输出只有 content 一个字段；content 的第一行必须是 mindmap，"
             "后续只包含一个主题根节点及分层子节点。"
             "content 中不要包含 Markdown 代码围栏、解释文字、HTML 或来源元数据。"
-            "使用中文标签，节点内容必须能够由课程知识库支持。"
+            "使用 12 至 24 个简短中文节点，最多四层。必须覆盖核心定义、前置知识、"
+            "核心概念、学科方法、常见错误、应用任务和 Evaluation 重点，禁止泄漏其他课程。"
+            "节点不得使用引号、冒号、反斜杠、复杂公式或未转义括号，"
+            "节点内容必须能够由课程知识库支持。"
         )
         user_content = f"主题：{topic}\n难度：{difficulty}\n"
         if rag_context:
@@ -59,29 +65,36 @@ class MindMapAgent(BaseResourceAgent):
         rag_context: str,
         references: list[SourceReference],
     ) -> Resource:
+        if should_use_cross_subject(context):
+            return mind_map_resource(context, topic, difficulty, references)
         level_labels = {"beginner": "入门", "intermediate": "进阶", "advanced": "高级"}
         label = level_labels.get(difficulty, "入门")
         content = (
             "mindmap\n"
-            f"  root(({topic} - {label}))\n"
-            "    概念定义\n"
-            "      直观理解\n"
-            "      形式化定义\n"
+            f"  root(({topic} {label}))\n"
+            "    核心定义\n"
+            "      任务目标\n"
+            "      输入输出\n"
+            "    前置知识\n"
+            "      数据划分\n"
+            "      损失函数\n"
             "    核心原理\n"
-            "      数学基础\n"
-            "      算法流程\n"
-            "    应用场景\n"
-            "      经典案例\n"
-            "      实际项目\n"
-            "    常见误区\n"
-            "      易混淆概念\n"
-            "      典型错误\n"
-            "    关联知识\n"
-            "      前置概念\n"
-            "      后续进阶\n"
+            "      参数学习\n"
+            "      泛化验证\n"
+            "    执行流程\n"
+            "      建立基线\n"
+            "      训练模型\n"
+            "      验证调整\n"
+            "    常见错误\n"
+            "      数据泄漏\n"
+            "      盲目调参\n"
+            "    项目应用\n"
+            "      客户流失\n"
+            "      模型比较\n"
+            "    Evaluation重点\n"
+            "      结果解释\n"
+            "      错题复盘\n"
         )
-        if rag_context:
-            content += "%% 知识库参考片段已用于生成\n"
         return self._finalize_draft(
             MindMapDraft(content=content),
             topic,

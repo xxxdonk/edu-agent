@@ -12,27 +12,46 @@
         <strong>完成题目后提交 Evaluation</strong>
         <span>系统将读取持久化标准答案评分，并展示画像与路径变化。</span>
       </div>
-      <div class="quiz-list">
-        <article v-for="(question, index) in quiz.questions" :key="question.id" class="quiz-question">
-          <div class="question-number">{{ index + 1 }}</div>
+      <div class="quiz-progress">
+        <div><strong>第 {{ currentIndex + 1 }} / {{ quiz.questions.length }} 题</strong><span>已完成 {{ answeredCount }} 题</span></div>
+        <el-progress :percentage="completionPercentage" :show-text="false" />
+      </div>
+      <div class="quiz-question-nav" aria-label="题目导航">
+        <button
+          v-for="(question, index) in quiz.questions"
+          :key="question.id"
+          type="button"
+          :class="{'is-current': index === currentIndex, 'is-answered': Boolean(answers[question.id]?.trim())}"
+          :aria-label="`第 ${index + 1} 题${answers[question.id]?.trim() ? '，已作答' : '，未作答'}`"
+          @click="currentIndex = index"
+        >{{ index + 1 }}</button>
+      </div>
+      <div v-if="currentQuestion" class="quiz-list">
+        <article :key="currentQuestion.id" class="quiz-question">
+          <div class="question-number">{{ currentIndex + 1 }}</div>
           <div class="question-body">
-            <div class="question-meta"><el-tag size="small">{{ levelLabel(question.level) }}</el-tag><span>{{ typeLabel(question.type) }}</span></div>
-            <h3>{{ question.question }}</h3>
-            <el-radio-group v-if="question.options?.length" v-model="answers[question.id]" class="option-group">
-              <el-radio v-for="option in question.options" :key="option" :value="option.slice(0, 1)">{{ option }}</el-radio>
+            <div class="question-meta"><el-tag size="small">{{ levelLabel(currentQuestion.level) }}</el-tag><span>{{ typeLabel(currentQuestion.type) }}</span></div>
+            <h3>{{ currentQuestion.question }}</h3>
+            <el-radio-group v-if="currentQuestion.options?.length" v-model="answers[currentQuestion.id]" class="option-group">
+              <el-radio v-for="option in currentQuestion.options" :key="option" :value="option.slice(0, 1)">{{ option }}</el-radio>
             </el-radio-group>
-            <el-input v-else v-model="answers[question.id]" type="textarea" :rows="3" placeholder="请输入你的回答" />
-            <div v-if="result" class="answer-review" :class="`answer-review--${questionResult(question.id).status}`">
-              <strong>{{ questionResult(question.id).line || '已完成评价' }}</strong>
-              <p>参考答案：{{ question.answer }}</p>
-              <p>解析：{{ question.explanation }}</p>
+            <el-input v-else v-model="answers[currentQuestion.id]" type="textarea" :rows="3" placeholder="请输入你的回答" />
+            <div v-if="result" class="answer-review" :class="`answer-review--${questionResult(currentQuestion.id).status}`">
+              <strong>{{ questionResult(currentQuestion.id).line || '已完成评价' }}</strong>
+              <p>参考答案：{{ currentQuestion.answer }}</p>
+              <p>解析：{{ currentQuestion.explanation }}</p>
             </div>
           </div>
         </article>
       </div>
+      <div class="quiz-navigation-actions">
+        <el-button :icon="ArrowLeft" :disabled="currentIndex === 0" @click="currentIndex -= 1">上一题</el-button>
+        <span>{{ unansweredCount ? `还有 ${unansweredCount} 题未作答` : '全部题目已作答' }}</span>
+        <el-button :icon="ArrowRight" :disabled="currentIndex >= quiz.questions.length - 1" @click="currentIndex += 1">下一题</el-button>
+      </div>
       <div class="evaluation-actions">
         <label>用时 <el-input-number v-model="timeSpent" :min="0" :max="600" /> 分钟</label>
-        <el-button type="primary" :icon="Checked" :loading="status === 'loading'" :disabled="!allAnswered" @click="$emit('submit', answers, timeSpent)">提交评价</el-button>
+        <el-button type="primary" :icon="Checked" :loading="status === 'loading'" :disabled="Boolean(result)" @click="submitEvaluation">{{ result ? '已提交评价' : '提交评价' }}</el-button>
       </div>
       <div v-if="result" class="evaluation-result">
         <div class="score-block" :class="{'score-block--passed': result.passed}">
@@ -40,6 +59,7 @@
           <el-tag :type="result.passed ? 'success' : 'warning'" size="large">{{ result.passed ? '已通过' : '需巩固' }}</el-tag>
         </div>
         <div class="feedback-grid">
+          <div><h4>错题与待巩固</h4><p>{{ incorrectCount }} 题</p></div>
           <div><h4>薄弱知识点</h4><p>{{ result.weak_topics.join('、') || '本轮未发现明显薄弱点' }}</p></div>
           <div><h4>学习建议</h4><p>{{ suggestion }}</p></div>
         </div>
@@ -82,7 +102,8 @@
 
 <script setup lang="ts">
 import {computed, reactive, ref, watch} from 'vue';
-import {Checked} from '@element-plus/icons-vue';
+import {ElMessage} from 'element-plus';
+import {ArrowLeft, ArrowRight, Checked} from '@element-plus/icons-vue';
 import DiffComparison from './DiffComparison.vue';
 import StatusBanner from '@/components/common/StatusBanner.vue';
 import {evaluationQuestionFeedback, pathDiff, profileDiff} from '@/utils/content';
@@ -97,7 +118,15 @@ const props = defineProps<{
 const emit = defineEmits<{(event: 'submit', answers: Record<string, string>, minutes: number): void}>();
 const answers = reactive<Record<string, string>>({});
 const timeSpent = ref(12);
-const allAnswered = computed(() => props.quiz?.questions.every((question) => answers[question.id]?.trim()) ?? false);
+const currentIndex = ref(0);
+const currentQuestion = computed(() => props.quiz?.questions[currentIndex.value] ?? null);
+const questionIds = computed(() => props.quiz?.questions.map((question) => question.id) ?? []);
+const answeredCount = computed(() => questionIds.value.filter((id) => answers[id]?.trim()).length);
+const unansweredCount = computed(() => questionIds.value.length - answeredCount.value);
+const completionPercentage = computed(() => questionIds.value.length ? Math.round(answeredCount.value / questionIds.value.length * 100) : 0);
+const incorrectCount = computed(() => props.result && props.quiz
+  ? props.quiz.questions.filter((question) => ['incorrect', 'partial'].includes(questionResult(question.id).status)).length
+  : 0);
 const quizFingerprint = computed(() => JSON.stringify(
   props.quiz?.questions.map((question) => ({id: question.id, question: question.question, options: question.options})) ?? [],
 ));
@@ -106,13 +135,24 @@ const pathRows = computed(() => pathDiff(props.previousPath, props.path));
 const changeSummary = computed(() => evaluationChangeSummary(
   props.previousProfile, props.profile, props.previousPath, props.path, props.result,
 ));
-const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用代码实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与代码资源后再次练习。`);
+const suggestion = computed(() => props.result?.passed ? '进入学习路径的下一步骤，并用应用实践巩固当前主题。' : `优先复习${props.result?.weak_topics.join('、') || '当前主题'}，完成讲解与实践资源后再次练习。`);
 
 watch(quizFingerprint, () => {
   Object.keys(answers).forEach((key) => delete answers[key]);
   timeSpent.value = 12;
+  currentIndex.value = 0;
 });
 function retryEvaluation() { emit('submit', {...answers}, timeSpent.value); }
+function submitEvaluation() {
+  if (props.result || props.status === 'loading') return;
+  if (unansweredCount.value) {
+    const firstUnanswered = questionIds.value.findIndex((id) => !answers[id]?.trim());
+    if (firstUnanswered >= 0) currentIndex.value = firstUnanswered;
+    ElMessage.warning(`还有 ${unansweredCount.value} 题未作答，已定位到第一道未答题。`);
+    return;
+  }
+  emit('submit', {...answers}, timeSpent.value);
+}
 function levelLabel(level: string) { return ({basic: '基础', intermediate: '进阶', advanced: '挑战'} as Record<string, string>)[level] ?? level; }
 function typeLabel(type: string) { return ({single_choice: '单选题', short_answer: '简答题', comprehensive: '综合题'} as Record<string, string>)[type] ?? type; }
 function questionResult(questionId: string) { return evaluationQuestionFeedback(props.result?.feedback ?? '', questionId); }

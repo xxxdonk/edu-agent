@@ -289,6 +289,27 @@ describe('learning store profile chat', () => {
     expect(api.chat).not.toHaveBeenCalled();
   });
 
+  it('creates a fresh student identity and clears course state for a new session', () => {
+    const store = useLearningStore();
+    const previousStudentId = store.studentId;
+    store.profile = profileResponse(1, '').profile;
+    store.path = learningPath(1);
+    store.selectedStep = 3;
+    store.evaluation = evaluationResult();
+    store.composerDraft = '旧课程草稿';
+
+    store.resetSession();
+
+    expect(store.studentId).not.toBe(previousStudentId);
+    expect(store.profile).toBeNull();
+    expect(store.path).toBeNull();
+    expect(store.resources).toEqual([]);
+    expect(store.evaluation).toBeNull();
+    expect(store.taskEvents).toEqual([]);
+    expect(store.selectedStep).toBe(1);
+    expect(store.composerDraft).toBe('');
+  });
+
   it('sends only one path request while planning and blocks profile submission', async () => {
     let resolvePath!: (value: LearningPath) => void;
     vi.mocked(api.generatePath).mockImplementation(() => new Promise((resolve) => {

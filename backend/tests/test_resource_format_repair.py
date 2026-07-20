@@ -16,7 +16,7 @@ from app.orchestrator import SharedAgentContext
 from app.planner import DevelopmentPlannerAgent
 from app.profile import DevelopmentProfileAgent
 from app.rag import KnowledgeRetriever
-from app.resources.drafts import MindMapDraft, QuizDraft, ReadingDraft
+from app.resources.drafts import ExpandedQuizDraft, MindMapDraft, QuizDraft, ReadingDraft
 from app.resources.mindmap_agent import MindMapAgent
 from app.resources.quiz_agent import QuizAgent
 from app.resources.reading_agent import ReadingAgent
@@ -56,29 +56,27 @@ def _context(resource_type: ResourceType) -> SharedAgentContext:
 
 
 def _valid_quiz() -> dict:
-    return {
-        "basic": {
-            "question": "梯度下降每次更新参数时通常沿哪个方向移动？",
-            "options": [
-                "负梯度方向",
-                "正梯度方向",
-                "随机标签方向",
-                "固定参数方向",
-            ],
+    choices = []
+    written = []
+    challenge = []
+    for index in range(3):
+        choices.append({
+            "question": f"梯度下降第 {index + 1} 个基础辨析问题应选择哪个方向？",
+            "options": ["负梯度方向", "正梯度方向", "随机标签方向", "固定参数方向"],
             "answer": "a.",
             "explanation": "负梯度方向对应目标函数在局部下降最快的方向。",
-        },
-        "intermediate": {
-            "question": "学习率过大或过小时分别可能出现什么现象？",
+        })
+        written.append({
+            "question": f"学习率情形 {index + 1} 可能出现什么现象？",
             "answer": "过大可能震荡或发散，过小会使收敛速度变慢。",
             "explanation": "学习率控制每一步参数更新的幅度。",
-        },
-        "challenge": {
-            "question": "如何在分类项目中判断梯度下降是否正常收敛？",
-            "answer": "记录训练与验证损失，观察趋势并结合学习率检查震荡和停滞。",
+        })
+        challenge.append({
+            "question": f"项目场景 {index + 1} 中如何判断梯度下降是否正常收敛？",
+            "answer": "记录训练与验证损失，观察趋势并检查震荡和停滞。",
             "explanation": "同时观察训练和验证指标可以区分优化与泛化问题。",
-        },
-    }
+        })
+    return {"basic": choices, "intermediate": written, "challenge": challenge}
 
 
 def _valid_mind_map() -> dict:
@@ -93,6 +91,15 @@ def _valid_mind_map() -> dict:
             "      负梯度方向\r\n"
             "    学习率\r\n"
             "      控制更新步长\r\n"
+            "    数据划分\r\n"
+            "      训练数据\r\n"
+            "      验证数据\r\n"
+            "    常见错误\r\n"
+            "      学习率过大\r\n"
+            "      数据泄漏\r\n"
+            "    项目应用\r\n"
+            "      分类实验\r\n"
+            "      结果解释\r\n"
             "```"
         )
     }
@@ -100,14 +107,13 @@ def _valid_mind_map() -> dict:
 
 def _valid_reading() -> dict:
     return {
-        "overview": "梯度下降通过迭代更新参数来减小目标函数。\n理解它需要联系导数与优化目标。",
-        "core_points": [
-            "- 梯度表示目标函数在当前位置变化最快的方向。",
-            "学习率决定每次参数更新的步长。",
-            "训练损失与验证损失应结合观察。",
-        ],
-        "practice_connection": "在分类项目中记录每轮损失，并比较不同学习率的收敛曲线。",
-        "further_study": "继续学习随机梯度下降、动量方法以及模型评估。",
+        "objective": "建立梯度下降的分层阅读路线。",
+        "quick_read": "梯度下降通过迭代更新参数来减小目标函数。",
+        "deep_read": "理解它需要联系导数、学习率、优化目标以及训练和验证曲线。",
+        "project_route": ["明确任务", "记录损失", "比较验证结果"],
+        "glossary": [f"术语{i}：课程内定义{i}" for i in range(1, 9)],
+        "check_questions": [f"阅读检查问题{i}是什么？" for i in range(1, 6)],
+        "recommended_practice": "在分类项目中记录每轮损失，并比较不同学习率的收敛曲线。",
     }
 
 
@@ -119,21 +125,13 @@ def test_quiz_private_draft_is_fixed_and_binds_local_question_ids() -> None:
     )
 
     assert len(fake.calls) == 1
-    assert fake.calls[0]["response_model"] is QuizDraft
+    assert fake.calls[0]["response_model"] is ExpandedQuizDraft
     assert "development fallback" not in resource.personalization_reason
     payload = json.loads(resource.content)
     questions = payload["questions"]
-    assert len(questions) == 3
-    assert [question["type"] for question in questions] == [
-        "single_choice",
-        "short_answer",
-        "comprehensive",
-    ]
-    assert [question["level"] for question in questions] == [
-        "basic",
-        "intermediate",
-        "advanced",
-    ]
+    assert len(questions) == 9
+    assert [question["type"] for question in questions[:3]] == ["single_choice"] * 3
+    assert {question["level"] for question in questions} == {"basic", "intermediate", "advanced"}
     assert all(
         question["id"] == f"{resource.resource_id}::q{index}"
         for index, question in enumerate(questions, start=1)
@@ -195,7 +193,12 @@ def test_quiz_normalizes_exact_three_question_list_and_explicit_answer_text() ->
 
 
 def test_quiz_does_not_infer_an_ambiguous_choice_answer() -> None:
-    invalid = _valid_quiz()
+    expanded = _valid_quiz()
+    invalid = {
+        "basic": expanded["basic"][0],
+        "intermediate": expanded["intermediate"][0],
+        "challenge": expanded["challenge"][0],
+    }
     invalid["basic"]["answer"] = "负梯度可能是答案，也可能不是"
 
     with pytest.raises(ValueError):
@@ -226,11 +229,11 @@ def test_reading_private_draft_renders_fixed_simple_markdown_sections() -> None:
 
     assert len(fake.calls) == 1
     assert fake.calls[0]["response_model"] is ReadingDraft
-    assert resource.content.count("\n- ") == 3
-    assert "## 概览" in resource.content
-    assert "## 三个核心要点" in resource.content
-    assert "## 实践联系" in resource.content
-    assert "## 后续学习" in resource.content
+    assert resource.content.count("\n- ") >= 9
+    assert "## 2. 10 分钟快速阅读" in resource.content
+    assert "## 4. 项目阅读路线" in resource.content
+    assert "## 5. 关键术语表" in resource.content
+    assert "## 8. 真实 RAG 来源" in resource.content
     assert "- - " not in resource.content
     assert asyncio.run(ReviewerAgent().review(resource, context)).review_status == "approved"
 
@@ -238,7 +241,7 @@ def test_reading_private_draft_renders_fixed_simple_markdown_sections() -> None:
 @pytest.mark.parametrize(
     ("agent_class", "resource_type", "invalid", "valid"),
     [
-        (QuizAgent, ResourceType.QUIZ, {"basic": {}}, _valid_quiz()),
+            (QuizAgent, ResourceType.QUIZ, {"basic": []}, _valid_quiz()),
         (
             MindMapAgent,
             ResourceType.MIND_MAP,
@@ -249,10 +252,13 @@ def test_reading_private_draft_renders_fixed_simple_markdown_sections() -> None:
             ReadingAgent,
             ResourceType.READING,
             {
-                "overview": "概览",
-                "core_points": ["要点一", "要点二"],
-                "practice_connection": "实践",
-                "further_study": "后续",
+                    "objective": "目标",
+                    "quick_read": "快速",
+                    "deep_read": "深入",
+                    "project_route": ["一步"],
+                    "glossary": ["术语：解释"],
+                    "check_questions": ["问题"],
+                    "recommended_practice": "实践",
             },
             _valid_reading(),
         ),
@@ -279,16 +285,19 @@ def test_one_invalid_format_gets_exactly_one_repair_request(
 @pytest.mark.parametrize(
     ("agent_class", "resource_type", "invalid"),
     [
-        (QuizAgent, ResourceType.QUIZ, {"basic": {}}),
+        (QuizAgent, ResourceType.QUIZ, {"basic": []}),
         (MindMapAgent, ResourceType.MIND_MAP, {"content": "graph TD\n  A --> B"}),
         (
             ReadingAgent,
             ResourceType.READING,
             {
-                "overview": "概览",
-                "core_points": ["只有一个"],
-                "practice_connection": "实践",
-                "further_study": "后续",
+                "objective": "目标",
+                "quick_read": "快速",
+                "deep_read": "深入",
+                "project_route": ["一步"],
+                "glossary": ["术语：解释"],
+                "check_questions": ["问题"],
+                "recommended_practice": "实践",
             },
         ),
     ],

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
+import re
+import textwrap
 
 import pytest
 
@@ -197,58 +200,95 @@ class TestResourceAgentHeuristicGeneration:
             path=path,
         )
 
-    @pytest.mark.asyncio
-    async def test_explanation_agent_heuristic(self, context):
+    def test_explanation_agent_heuristic(self, context):
         agent = ExplanationAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         assert resource.resource_type == ResourceType.EXPLANATION
         assert len(resource.content) >= 50
         assert resource.title
+        for section in (
+            "本节学习目标", "为什么需要学习", "前置知识", "核心概念",
+            "原理与公式", "完整示例", "常见错误", "快速自检", "FAQ", "下一步建议",
+        ):
+            assert section in resource.content
+        assert resource.content.count("**Q") >= 5
+        assert resource.content.count(r"\(") == resource.content.count(r"\)")
 
-    @pytest.mark.asyncio
-    async def test_mindmap_agent_heuristic(self, context):
+    def test_mindmap_agent_heuristic(self, context):
         agent = MindMapAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         assert resource.resource_type == ResourceType.MIND_MAP
         assert len(resource.content) >= 20
+        nodes = [line for line in resource.content.splitlines() if line.strip() and line.strip() != "mindmap"]
+        assert 12 <= len(nodes) <= 24
+        assert "Evaluation重点" in resource.content
 
-    @pytest.mark.asyncio
-    async def test_quiz_agent_heuristic(self, context):
+    def test_quiz_agent_heuristic(self, context):
         agent = QuizAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         assert resource.resource_type == ResourceType.QUIZ
         assert len(resource.content) >= 30
+        questions = json.loads(resource.content)["questions"]
+        assert 8 <= len(questions) <= 12
+        assert {question["level"] for question in questions} == {"basic", "intermediate", "advanced"}
+        assert len({question["question"] for question in questions}) == len(questions)
+        for question in questions:
+            assert question["answer"] and question["explanation"]
+            if question["type"] == "single_choice":
+                assert question["answer"] in {"A", "B", "C", "D"}
+                assert len(set(question["options"])) == 4
 
-    @pytest.mark.asyncio
-    async def test_reading_agent_heuristic(self, context):
+    def test_reading_agent_heuristic(self, context):
         agent = ReadingAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         assert resource.resource_type == ResourceType.READING
         assert len(resource.content) >= 50
+        for section in ("10 分钟快速阅读", "深入阅读", "项目阅读路线", "关键术语表", "阅读检查问题", "真实 RAG 来源"):
+            assert section in resource.content
+        glossary = resource.content.partition("关键术语表")[2].partition("阅读检查问题")[0]
+        assert glossary.count("\n-") >= 8
 
-    @pytest.mark.asyncio
-    async def test_coding_agent_heuristic(self, context):
+    def test_coding_agent_heuristic(self, context):
         agent = CodingAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         assert resource.resource_type == ResourceType.CODING
         assert len(resource.content) >= 20
+        match = re.search(r"```python\n([\s\S]+?)```", resource.content)
+        assert match
+        ast.parse(textwrap.dedent(match.group(1)))
+        for section in ("预期输出", "TODO 练习", "调试提示", "进阶挑战", "反思问题"):
+            assert section in resource.content
 
-    @pytest.mark.asyncio
-    async def test_reviewer_approves_valid_resource(self, context):
+    def test_reviewer_approves_valid_resource(self, context):
         agent = ExplanationAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
+        resource = asyncio.run(agent.generate(context))
         reviewer = ReviewerAgent()
-        reviewed = await reviewer.review(resource, context)
+        reviewed = asyncio.run(reviewer.review(resource, context))
         assert reviewed.review_status in ("approved", "needs_revision", "rejected")
 
-    @pytest.mark.asyncio
-    async def test_reviewer_catches_missing_source_references(self, context):
+    def test_reviewer_approves_all_complete_heuristic_resources(self, context):
+        reviewer = ReviewerAgent()
+        for agent_type in (ExplanationAgent, MindMapAgent, QuizAgent, ReadingAgent, CodingAgent):
+            resource = asyncio.run(agent_type(llm_client=None, enable_llm=False).generate(context))
+            reviewed = asyncio.run(reviewer.review(resource, context))
+            assert reviewed.review_status == "approved", reviewed.personalization_reason
+
+    def test_explanation_and_reading_are_not_highly_repetitive(self, context):
+        explanation = asyncio.run(
+            ExplanationAgent(llm_client=None, enable_llm=False).generate(context)
+        )
+        reading = asyncio.run(
+            ReadingAgent(llm_client=None, enable_llm=False).generate(context)
+        )
+        assert ReviewerAgent.content_similarity(explanation.content, reading.content) < 0.45
+
+    def test_reviewer_catches_missing_source_references(self, context):
         reviewer = ReviewerAgent()
         # Create an empty source reference to satisfy min_length=1 but still be "bad"
         # Use a proper resource by generating one and then stripping references
         agent = ExplanationAgent(llm_client=None, enable_llm=False)
-        resource = await agent.generate(context)
-        reviewed = await reviewer.review(resource, context)
+        resource = asyncio.run(agent.generate(context))
+        reviewed = asyncio.run(reviewer.review(resource, context))
         # Should have source references from RAG, but if not, that's also valid
         assert reviewed.review_status in ("approved", "needs_revision", "rejected")
 

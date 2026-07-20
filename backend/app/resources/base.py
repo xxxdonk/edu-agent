@@ -19,6 +19,7 @@ from app.orchestrator import SharedAgentContext
 from app.rag import KnowledgeRetriever
 from app.schemas import Resource, ResourceType, SourceReference
 from app.schemas.common import Difficulty
+from app.subjects import subject_context_from_profile
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class BaseResourceAgent(ABC):
         )
         topic = step.topic
         difficulty = context.profile.knowledge_level.value or Difficulty.BEGINNER
+        subject = subject_context_from_profile(context.profile)
 
         self._emit_retrieval_event(
             context,
@@ -59,7 +61,12 @@ class BaseResourceAgent(ABC):
             message="Retriever Agent 开始检索课程知识库",
         )
         try:
-            rag_chunks = self._retriever.retrieve(topic, difficulty=difficulty)
+            rag_chunks = self._retriever.retrieve(
+                topic,
+                difficulty=difficulty,
+                subject_name=subject.subject_name,
+                learning_goal=subject.learning_goal,
+            )
         except Exception as error:
             self._emit_retrieval_event(
                 context,
@@ -73,18 +80,25 @@ class BaseResourceAgent(ABC):
         if not references:
             self._emit_retrieval_event(
                 context,
-                status="failed",
+                status="completed",
                 progress=15,
-                message="Retriever Agent 未找到可核验的课程依据",
-                error="no_reliable_knowledge_source",
+                message="本地知识库未命中相关课程资料，将使用通用模型或学科规则生成",
             )
-            raise ValueError(f"知识库中没有可核验的主题依据：{topic}")
-        self._emit_retrieval_event(
-            context,
-            status="completed",
-            progress=15,
-            message=f"Retriever Agent 完成检索，命中 {len(references)} 个课程片段",
-        )
+            references = [
+                SourceReference(
+                    source_id="general-model",
+                    title="本地知识库未命中相关课程资料，本资源由通用模型生成",
+                    locator="model://general-knowledge",
+                    chunk_id=None,
+                )
+            ]
+        else:
+            self._emit_retrieval_event(
+                context,
+                status="completed",
+                progress=15,
+                message=f"Retriever Agent 完成检索，命中 {len(references)} 个课程片段",
+            )
         rag_context = self._build_rag_context(rag_chunks)
 
         if self._enable_llm and self._llm_client is not None:
@@ -226,7 +240,8 @@ class BaseResourceAgent(ABC):
         weak = profile.weak_topics.value or []
         weak_str = "、".join(weak) if weak else "无特定薄弱点"
         style = profile.cognitive_style.value or "综合型"
-        return f"学生薄弱点：{weak_str}；认知风格：{style}；学习目标：{'、'.join(profile.learning_goals.value or ['完成课程'])}"
+        course = profile.course.value or "当前学习主题"
+        return f"当前课程：{course}；学生薄弱点：{weak_str}；认知风格：{style}；学习目标：{'、'.join(profile.learning_goals.value or ['完成当前学习任务'])}"
 
     @staticmethod
     def _make_resource_id() -> str:

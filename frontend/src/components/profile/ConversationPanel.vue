@@ -43,6 +43,19 @@
       </button>
     </div>
 
+    <div class="subject-example-picker">
+      <span>全科学习示例</span>
+      <el-select
+        v-model="selectedExample"
+        clearable
+        placeholder="选择示例后填入输入框"
+        aria-label="全科学习示例"
+        @change="applySubjectExample"
+      >
+        <el-option v-for="item in subjectExamples" :key="item.label" :label="item.label" :value="item.label" />
+      </el-select>
+    </div>
+
     <div class="prompt-suggestions">
       <button v-for="suggestion in suggestions" :key="suggestion" type="button" @click="store.composerDraft = suggestion">{{ suggestion }}</button>
     </div>
@@ -54,7 +67,7 @@
         :rows="3"
         resize="none"
         maxlength="8000"
-        placeholder="例如：我是计算机专业学生，机器学习零基础，梯度下降不太懂..."
+        placeholder="例如：我是高二学生，想提高数学函数部分，目标是期末考试，每天可以学习 45 分钟……"
         aria-label="学习情况输入框"
         @keydown.ctrl.enter="submit"
       />
@@ -80,17 +93,15 @@ import StatusBanner from '@/components/common/StatusBanner.vue';
 import {demoCases, type DemoCase} from '@/config/demoCases';
 import {useLearningStore} from '@/stores/learning';
 import {needsDemoCaseConfirmation} from '@/utils/presentation';
+import {conversationSuggestions, profileCourse, subjectExamples} from '@/utils/subject';
 
 const store = useLearningStore();
 const scrollArea = ref<HTMLElement | null>(null);
+const selectedExample = ref('');
 const submissionLocked = computed(() => (
   store.profileStatus === 'loading' || store.pathStatus === 'loading'
 ));
-const suggestions = [
-  '我该从哪里开始学机器学习？',
-  '我每天只有45分钟，喜欢边写代码边学。',
-  '梯度下降一直没弄懂，希望完成课程项目。',
-];
+const suggestions = computed(() => conversationSuggestions(profileCourse(store.profile)));
 
 async function submit() {
   if (submissionLocked.value) return;
@@ -114,6 +125,27 @@ async function applyDemoCase(item: DemoCase) {
   }
   store.fillDemoCase(item.input);
   ElMessage.success(`已填入案例 ${item.code}，可修改后再发送`);
+}
+
+async function applySubjectExample(label: string) {
+  const item = subjectExamples.find((example) => example.label === label);
+  if (!item) return;
+  const hasUserConversation = store.messages.some((message) => message.role === 'user');
+  if (needsDemoCaseConfirmation(store.composerDraft, hasUserConversation)) {
+    try {
+      await ElMessageBox.confirm(
+        '示例只会替换输入框内容，不会自动发送或清空已有对话。是否继续？',
+        '填入全科学习示例',
+        {confirmButtonText: '继续填入', cancelButtonText: '取消', type: 'warning'},
+      );
+    } catch {
+      selectedExample.value = '';
+      return;
+    }
+  }
+  store.fillDemoCase(item.prompt);
+  selectedExample.value = '';
+  ElMessage.success(`已填入${item.label}示例，可修改后再发送`);
 }
 
 watch(() => store.messages.length, async () => {

@@ -35,10 +35,24 @@ export interface EvaluationChangeSummary {
   newFocus: string[];
 }
 
+export interface ResourcePackageSummary {
+  topic: string;
+  difficulty: string;
+  completed: number;
+  missingLabels: string[];
+  recommendedOrder: string[];
+  estimatedMinutes: number | null;
+  sourceCount: number;
+  approvedCount: number;
+  evaluationLabel: string;
+  partial: boolean;
+}
+
 const terminalStatuses = new Set(['completed', 'partial_success', 'failed']);
 const resourceTypeLabels = {
   explanation: '课程讲解', mind_map: '思维导图', quiz: '分层练习', reading: '拓展阅读', coding: '代码实践',
 } as const;
+const learningOrder = ['explanation', 'mind_map', 'reading', 'coding', 'quiz'] as const;
 const resourceTraceKeys = [
   ['explanation_agent', '课程讲解'],
   ['mind_map_agent', '思维导图'],
@@ -246,4 +260,66 @@ export function safeFailureMessage(message: string): string {
     return '资源生成过程中出现内部错误，详细信息已由服务端记录。';
   }
   return message.split(/\r?\n/, 1)[0].trim().slice(0, 180) || '该资源暂时未生成成功。';
+}
+
+export function buildResourcePackageSummary(
+  resources: Resource[],
+  path: LearningPath | null,
+  selectedStep: number,
+  task: TaskState | null,
+  evaluation: EvaluationResult | null,
+): ResourcePackageSummary {
+  const available = new Set(resources.map((resource) => resource.resource_type));
+  const step = path?.steps.find((item) => item.step === selectedStep) ?? null;
+  const first = resources[0];
+  const sources = new Set(
+    resources.flatMap((resource) => resource.source_references)
+      .filter((source) => source.source_id !== 'general-model')
+      .map((source) => `${source.source_id}|${source.locator}`),
+  );
+  const missingLabels = learningOrder
+    .filter((type) => !available.has(type))
+    .map((type) => resourceTypeLabels[type]);
+  return {
+    topic: first?.target_topic || step?.topic || '等待选择学习主题',
+    difficulty: first?.difficulty || '尚未生成',
+    completed: available.size,
+    missingLabels,
+    recommendedOrder: [...learningOrder.map((type) => resourceTypeLabels[type]), '提交 Evaluation'],
+    estimatedMinutes: step?.estimated_minutes ?? null,
+    sourceCount: sources.size,
+    approvedCount: resources.filter((resource) => resource.review_status === 'approved').length,
+    evaluationLabel: evaluation
+      ? `${Math.round(evaluation.mastery_score * 100)} 分 · ${evaluation.passed ? '已通过' : '需巩固'}`
+      : '尚未提交',
+    partial: task?.status === 'partial_success' || (resources.length > 0 && missingLabels.length > 0),
+  };
+}
+
+export function resourceFollowUpSuggestions(type: Resource['resource_type']): string[] {
+  return {
+    explanation: ['再举一个更简单的例子', '解释这个公式中的每个变量', '总结最常见的错误', '如何用于我的项目'],
+    mind_map: ['展开核心原理分支', '解释节点之间的关系', '转换为我的学习清单'],
+    quiz: ['复习错题对应的知识点', '再出一组同难度练习', '解释容易误选的选项'],
+    reading: ['给出推荐阅读顺序', '提炼关键术语表', '生成阅读检查清单'],
+    coding: ['逐步解释这项实践', '增加一个进阶练习', '如何检查实践结果', '如何迁移到新的应用任务'],
+  }[type];
+}
+
+export function profilePersonalizationEvidence(profile: StudentProfile | null): string[] {
+  if (!profile) return [];
+  const evidence: string[] = [];
+  const goals = textList(fieldValue(profile.learning_goals));
+  const weakTopics = textList(fieldValue(profile.weak_topics));
+  const preferences = textList(fieldValue(profile.resource_preference));
+  const budget = fieldValue(profile.time_budget);
+  if (goals.length) evidence.push(`依据你的目标：${goals.join('、')}`);
+  if (weakTopics.length) evidence.push(`依据你的薄弱点：${weakTopics.join('、')}`);
+  if (preferences.length) evidence.push(`依据你的偏好：${preferences.join('、')}`);
+  if (budget?.minutes_per_day) evidence.push(`依据你的时间预算：每天 ${budget.minutes_per_day} 分钟`);
+  return evidence;
+}
+
+export function unansweredQuizCount(questionIds: string[], answers: Record<string, string>): number {
+  return questionIds.filter((id) => !answers[id]?.trim()).length;
 }

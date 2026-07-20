@@ -62,7 +62,13 @@
             :status="store.resourceStatus"
             :can-generate="store.hasCoreContext"
             :fallback-mode="fallbackModeMessage"
+            :profile="store.profile"
+            :path="store.path"
+            :selected-step="store.selectedStep"
+            :task="store.task"
+            :evaluation="store.evaluation"
             @generate="store.startGeneration(true)"
+            @follow-up="handleResourceFollowUp"
           />
           <div class="progress-stack">
             <TaskProgressTimeline
@@ -93,7 +99,7 @@
 
 <script setup lang="ts">
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue';
-import {ElMessage} from 'element-plus';
+import {ElMessage, ElMessageBox} from 'element-plus';
 import {Connection, CopyDocument, Monitor, RefreshLeft} from '@element-plus/icons-vue';
 import AgentTracePanel from '@/components/agents/AgentTracePanel.vue';
 import TaskProgressTimeline from '@/components/agents/TaskProgressTimeline.vue';
@@ -164,6 +170,23 @@ async function copyLearningPlan() {
   } catch {
     ElMessage.warning('当前浏览器无法访问剪贴板，请使用支持 Clipboard API 的安全页面。');
   }
+}
+
+async function handleResourceFollowUp(suggestion: string) {
+  if (store.composerDraft.trim()) {
+    try {
+      await ElMessageBox.confirm(
+        '输入框中已有草稿。是否用这条学习追问建议替换？',
+        '填入学习追问',
+        {confirmButtonText: '替换草稿', cancelButtonText: '保留草稿', type: 'warning'},
+      );
+    } catch {
+      return;
+    }
+  }
+  store.composerDraft = suggestion;
+  activeTab.value = 'profile';
+  ElMessage.success('已填入学习追问，可修改后再发送');
 }
 
 function handleEscape(event: KeyboardEvent) {

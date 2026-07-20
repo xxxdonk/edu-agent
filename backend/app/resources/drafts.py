@@ -208,17 +208,38 @@ class QuizDraft(ApiModel):
         }
 
 
+class ExpandedQuizDraft(ApiModel):
+    basic: list[QuizChoiceDraft] = Field(min_length=3, max_length=4)
+    intermediate: list[QuizWrittenDraft] = Field(min_length=3, max_length=5)
+    challenge: list[QuizWrittenDraft] = Field(min_length=2, max_length=3)
+
+    @model_validator(mode="after")
+    def question_count_must_fit_learning_session(self) -> "ExpandedQuizDraft":
+        count = len(self.basic) + len(self.intermediate) + len(self.challenge)
+        if not 8 <= count <= 12:
+            raise ValueError("expanded quiz must contain 8 to 12 questions")
+        return self
+
+
 class MindMapDraft(ApiModel):
     content: str = Field(min_length=1)
 
 
 class ReadingDraft(ApiModel):
-    overview: str = Field(min_length=1)
-    core_points: list[str] = Field(min_length=3, max_length=3)
-    practice_connection: str = Field(min_length=1)
-    further_study: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    quick_read: str = Field(min_length=1)
+    deep_read: str = Field(min_length=1)
+    project_route: list[str] = Field(min_length=3, max_length=6)
+    glossary: list[str] = Field(min_length=8, max_length=12)
+    check_questions: list[str] = Field(min_length=5, max_length=8)
+    recommended_practice: str = Field(min_length=1)
 
-    @field_validator("overview", "practice_connection", "further_study")
+    @field_validator(
+        "objective",
+        "quick_read",
+        "deep_read",
+        "recommended_practice",
+    )
     @classmethod
     def strip_required_paragraph(cls, value: str) -> str:
         stripped = value.strip()
@@ -226,10 +247,10 @@ class ReadingDraft(ApiModel):
             raise ValueError("reading paragraphs must not be blank")
         return stripped
 
-    @field_validator("core_points")
+    @field_validator("project_route", "glossary", "check_questions")
     @classmethod
-    def strip_core_points(cls, value: list[str]) -> list[str]:
+    def strip_list_items(cls, value: list[str]) -> list[str]:
         normalized = [point.strip() for point in value]
         if any(not point for point in normalized):
-            raise ValueError("reading core points must not be blank")
+            raise ValueError("reading list items must not be blank")
         return normalized
